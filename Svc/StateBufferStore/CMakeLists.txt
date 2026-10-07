@@ -1,0 +1,31 @@
+####
+# FPrime CMakeLists.txt:
+#
+# SOURCE_FILES: combined list of source and autocoding files
+# MOD_DEPS: (optional) module dependencies
+# UT_SOURCE_FILES: list of source files for unit tests
+#
+# More information in the F´ CMake API documentation:
+# https://fprime.jpl.nasa.gov/latest/docs/user-manual/cmake/cmake-api/
+#
+####
+
+register_fprime_module(
+  AUTOCODER_INPUTS
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStorePorts.fpp"
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStore.fpp"
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStore.cpp"
+  HEADERS
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStore.hpp"
+)
+
+register_fprime_ut(
+  AUTOCODER_INPUTS
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStorePorts.fpp"
+    "${CMAKE_CURRENT_LIST_DIR}/StateBufferStore.fpp"
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/test/ut/StateBufferStoreTester.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/test/ut/StateBufferStoreTestMain.cpp"
+  UT_AUTO_HELPERS
+)

@@ -9,6 +9,7 @@
 - [F Prime FatalHandler SDD](https://github.com/nasa/fprime/blob/devel/Svc/FatalHandler/docs/sdd.md)
 - [F Prime Fatal Port SDD](https://github.com/nasa/fprime/blob/devel/Svc/Fatal/docs/sdd.md)
 - [F Prime PolyDb SDD](https://github.com/nasa/fprime/blob/devel/Svc/PolyDb/docs/sdd.md)
+- [F Prime StateBufferStore SDD](https://github.com/nasa/fprime/blob/devel/Svc/StateBufferStore/docs/sdd.md)
 
 ## Overview
 
@@ -45,6 +46,12 @@ The fatal handling path is: assertion or fatal event → Event Manager fatal ann
 ### Polymorphic Database
 
 The Polymorphic Database (PolyDb) provides a general-purpose in-memory store for named values of varying types. Components can write values to the database and other components can read them. Values are stored using a polymorphic type that can hold any primitive type. This is useful for sharing computed values, calibration data, or algorithm state between components without requiring dedicated ports for each value.
+
+### State Buffer Store
+
+The State Buffer Store extends the polymorphic database idea with history and extremes. Alongside each entry's latest value it records the minimum and maximum ever stored — each with its own timestamp — and keeps a circular history of recent measurements whose depth is configured per entry. Readers can retrieve the latest value, the watermarks, the full history, or just the most recent N measurements, and each read reports whether the value has never been written or has not changed since that reader last looked.
+
+Use PolyDb when only the latest value matters; use the State Buffer Store when a consumer needs trend data, extremes for telemetry, or a short history to downlink after an anomaly. Readers and writers are coordinated without mutexes by a per-entry coherency counter, so a reader can detect and retry a measurement that was rewritten mid-read.
 
 ### Off Nominal
 
