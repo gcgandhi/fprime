@@ -55,6 +55,9 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A read repeating the previous measurement time reports NOT_FRESH
     void notFreshTest();
 
+    //! A read with no previous read time is never reported NOT_FRESH
+    void lastReadTimeOptionalTest();
+
     //! Entries are independent of one another
     void entryIsolationTest();
 
@@ -136,6 +139,45 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
 
     //! Watermark reads torn on every attempt report INCOHERENT and a FATAL event
     void watermarkTornReadTest();
+
+    //! Each entry keeps its own configured depth, including the bounds
+    void perEntryDepthTest();
+
+    //! A value of a different type than the watermarks leaves them unchanged
+    void watermarkTypeMismatchTest();
+
+    //! Mapped telemetry is decoded and stored with the sender's time tag
+    void tlmStoreTest();
+
+    //! Unmapped telemetry is ignored
+    void tlmUnmappedTest();
+
+    //! Telemetry of every mapping type decodes to a PolyType of that type
+    void tlmAllTypesTest();
+
+    //! Telemetry that does not decode as its mapping's type is reported, not stored
+    void tlmDecodeFailedTest();
+
+    //! An entry mapped to telemetry refuses data puts before any telemetry arrives
+    void tlmEntryRefusesDataTest();
+
+    //! Using the component before configure() asserts
+    void unconfiguredDeathTest();
+
+    //! Configuring twice asserts
+    void configureTwiceDeathTest();
+
+    //! An N-measurement read deeper than the entry asserts
+    void nHistoryTooDeepDeathTest();
+
+    //! A data put larger than MAX_DATA_SIZE asserts
+    void oversizedPutDataDeathTest();
+
+    //! A put of an untyped PolyType asserts
+    void untypedPutDeathTest();
+
+    //! A malformed telemetry mapping table asserts at configuration
+    void tlmMappingDeathTest();
 
   private:
     // ----------------------------------------------------------------------

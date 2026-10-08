@@ -44,14 +44,30 @@ module Svc {
     @ interfaces and sizes the worst-case allocation.
     constant MAX_HISTORY_DEPTH = 16
 
-    @ History depth applied to entries not overridden in HISTORY_DEPTHS.
-    @ Must be at least 2, the floor set by REQ-STATEBUFFERSTORE-010.
+    @ Smallest history depth an entry may be configured with, the floor set
+    @ by REQ-STATEBUFFERSTORE-010
+    constant MIN_HISTORY_DEPTH = 2
+
+    @ Typical history depth for an entry
     constant DEFAULT_HISTORY_DEPTH = 4
 
-    @ Per-entry history depth. Each element must be in [2, MAX_HISTORY_DEPTH];
-    @ StateBufferStore asserts this at configuration time.
+    @ Per-entry history depth, one element per StateEntry. Each element must
+    @ be in [MIN_HISTORY_DEPTH, MAX_HISTORY_DEPTH]; StateBufferStore asserts
+    @ this at configuration time. The sample sets the last two entries to the
+    @ bounds to show that depths are independent.
     array HistoryDepths = [StateEntry.NUM_ENTRIES] FwSizeType \
-      default DEFAULT_HISTORY_DEPTH
+      default [
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        DEFAULT_HISTORY_DEPTH
+        MIN_HISTORY_DEPTH
+        MAX_HISTORY_DEPTH
+      ]
 
     @ Maximum size in bytes of a single string, struct, or byte-array
     @ measurement. Sizes the payload region of every entry's history.

@@ -27,6 +27,66 @@ constexpr I32 RACING_PUT_VALUE = 500;
 //! Memory identifier the component under test allocates under
 constexpr FwEnumStoreType TEST_MEM_ID = 0;
 
+//! Entries the sample configuration sets to the depth bounds
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_MIN_DEPTH = StateBufferStoreCfg::StateEntry::SBS_ENTRY_08;
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_MAX_DEPTH = StateBufferStoreCfg::StateEntry::SBS_ENTRY_09;
+
+//! Telemetry channels in the test mapping table, and one outside it
+constexpr FwChanIdType TLM_CHAN_U32 = 0x100;
+constexpr FwChanIdType TLM_CHAN_F32 = 0x101;
+constexpr FwChanIdType TLM_CHAN_BOOL = 0x102;
+constexpr FwChanIdType TLM_CHAN_UNMAPPED = 0x1FF;
+
+//! Entries the test telemetry channels are stored in
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_U32 = StateBufferStoreCfg::StateEntry::SBS_ENTRY_05;
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_F32 = StateBufferStoreCfg::StateEntry::SBS_ENTRY_06;
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_BOOL = StateBufferStoreCfg::StateEntry::SBS_ENTRY_07;
+
+//! Telemetry mapping table given to the component under test
+SbsTlmMapping TLM_MAPPINGS[] = {
+    SbsTlmMapping(TLM_CHAN_U32, ENTRY_TLM_U32, SbsTlmType::TYPE_U32),
+    SbsTlmMapping(TLM_CHAN_F32, ENTRY_TLM_F32, SbsTlmType::TYPE_F32),
+    SbsTlmMapping(TLM_CHAN_BOOL, ENTRY_TLM_BOOL, SbsTlmType::TYPE_BOOL),
+};
+
+//! Read from a component that was never configured
+void readUnconfigured() {
+    StateBufferStore fresh("fresh");
+    fresh.init(StateBufferStoreTester::TEST_INSTANCE_ID);
+    Fw::PolyType value;
+    Fw::Time measTime;
+    (void)fresh.get_getValue_InputPort(0)->invoke(ENTRY_A, value, measTime, Fw::Time());
+}
+
+//! Store one telemetry value in a fresh component mapping it as the given
+//! type, and return what that component then reports for the entry
+template <typename T>
+Fw::PolyType storeTlmAs(SbsTlmType::T type, T sample) {
+    Fw::MallocAllocator allocator;
+    StateBufferStore fresh("fresh");
+    fresh.init(StateBufferStoreTester::TEST_INSTANCE_ID);
+    SbsTlmMapping mapping[] = {SbsTlmMapping(TLM_CHAN_U32, ENTRY_A, type)};
+    fresh.configure(TEST_MEM_ID, allocator, Fw::ExternalArray<SbsTlmMapping>(mapping, FW_NUM_ARRAY_ELEMENTS(mapping)));
+
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer buffer;
+    EXPECT_EQ(buffer.serializeFrom(sample), Fw::FW_SERIALIZE_OK);
+    fresh.get_tlmIn_InputPort(0)->invoke(TLM_CHAN_U32, tag, buffer);
+
+    Fw::PolyType value;
+    Fw::Time measTime;
+    EXPECT_EQ(fresh.get_getValue_InputPort(0)->invoke(ENTRY_A, value, measTime, Fw::Time()), SbsStatus::OK);
+    return value;
+}
+
+//! Configure a fresh component with the given telemetry mappings
+void configureWithMappings(SbsTlmMapping* mappings, FwSizeType count) {
+    Fw::MallocAllocator allocator;
+    StateBufferStore fresh("fresh");
+    fresh.init(StateBufferStoreTester::TEST_INSTANCE_ID);
+    fresh.configure(TEST_MEM_ID, allocator, Fw::ExternalArray<SbsTlmMapping>(mappings, count));
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------------
@@ -39,7 +99,8 @@ StateBufferStoreTester::StateBufferStoreTester()
       m_cmdSeq(0) {
     this->initComponents();
     this->connectPorts();
-    this->component.configure(TEST_MEM_ID, this->m_allocator);
+    this->component.configure(TEST_MEM_ID, this->m_allocator,
+                              Fw::ExternalArray<SbsTlmMapping>(TLM_MAPPINGS, FW_NUM_ARRAY_ELEMENTS(TLM_MAPPINGS)));
 }
 
 StateBufferStoreTester::~StateBufferStoreTester() {}
@@ -150,6 +211,30 @@ void StateBufferStoreTester::notFreshTest() {
     this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(6)), 51);
     ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_A, value, measTime, Fw::Time(TimeBase::TB_WORKSTATION_TIME, 50, 0)),
               SbsStatus::OK);
+}
+
+void StateBufferStoreTester::lastReadTimeOptionalTest() {
+    // A measurement stamped with zero time, as from an unconnected time
+    // source, is where a missing previous read could be mistaken for a match
+    this->setTestTime(Fw::ZERO_TIME);
+    Fw::PolyType first(static_cast<U32>(8));
+    ASSERT_EQ(this->invoke_to_putValue(0, ENTRY_A, first, SbsStatus::OK), SbsStatus::OK);
+    Fw::PolyType second(static_cast<U32>(9));
+    ASSERT_EQ(this->invoke_to_putValue(0, ENTRY_A, second, SbsStatus::OK), SbsStatus::OK);
+
+    Fw::PolyType value;
+    Fw::Time measTime;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_A, value, measTime, Fw::ZERO_TIME), SbsStatus::OK);
+    ASSERT_EQ(measTime, Fw::ZERO_TIME);
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_A, value, measTime, Fw::ZERO_TIME), SbsStatus::OK);
+
+    U8 stored[] = {'z'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_B, in, SbsStatus::OK), SbsStatus::OK);
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE];
+    Fw::Buffer out(readBack, sizeof readBack);
+    FwSizeType sizeOut = 0;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_B, out, measTime, Fw::ZERO_TIME, sizeOut), SbsStatus::OK);
 }
 
 void StateBufferStoreTester::entryIsolationTest() {
@@ -453,14 +538,20 @@ void StateBufferStoreTester::invalidEntryCommandTest() {
     const U32 reportSeq = this->m_cmdSeq++;
     this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, reportSeq,
                                     StateBufferStoreCfg::StateEntry::NUM_ENTRIES);
-    ASSERT_EVENTS_SIZE(0);
+    ASSERT_EVENTS_SIZE(1);
+    ASSERT_EVENTS_ReportWatermarksRejected_SIZE(1);
+    ASSERT_EVENTS_ReportWatermarksRejected(0, StateBufferStoreCfg::StateEntry::NUM_ENTRIES,
+                                           StateBufferStore_WatermarkRejection::NOT_AN_ENTRY);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, reportSeq, Fw::CmdResponse::VALIDATION_ERROR);
 
     const U32 clearSeq = this->m_cmdSeq++;
     this->sendCmd_CLEAR_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, clearSeq,
                                    StateBufferStoreCfg::StateEntry::NUM_ENTRIES);
-    ASSERT_EVENTS_SIZE(0);
+    ASSERT_EVENTS_SIZE(2);
+    ASSERT_EVENTS_ClearWatermarksRejected_SIZE(1);
+    ASSERT_EVENTS_ClearWatermarksRejected(0, StateBufferStoreCfg::StateEntry::NUM_ENTRIES,
+                                          StateBufferStore_WatermarkRejection::NOT_AN_ENTRY);
     ASSERT_CMD_RESPONSE_SIZE(2);
     ASSERT_CMD_RESPONSE(1, StateBufferStore::OPCODE_CLEAR_WATERMARKS, clearSeq, Fw::CmdResponse::VALIDATION_ERROR);
 }
@@ -670,7 +761,11 @@ void StateBufferStoreTester::dataEntryRefusesValueTest() {
     this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, reportSeq, ENTRY_B);
     const U32 clearSeq = this->m_cmdSeq++;
     this->sendCmd_CLEAR_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, clearSeq, ENTRY_B);
-    ASSERT_EVENTS_SIZE(0);
+    ASSERT_EVENTS_SIZE(2);
+    ASSERT_EVENTS_ReportWatermarksRejected_SIZE(1);
+    ASSERT_EVENTS_ReportWatermarksRejected(0, ENTRY_B, StateBufferStore_WatermarkRejection::DATA_ENTRY);
+    ASSERT_EVENTS_ClearWatermarksRejected_SIZE(1);
+    ASSERT_EVENTS_ClearWatermarksRejected(0, ENTRY_B, StateBufferStore_WatermarkRejection::DATA_ENTRY);
     ASSERT_CMD_RESPONSE_SIZE(2);
     ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, reportSeq, Fw::CmdResponse::EXECUTION_ERROR);
     ASSERT_CMD_RESPONSE(1, StateBufferStore::OPCODE_CLEAR_WATERMARKS, clearSeq, Fw::CmdResponse::EXECUTION_ERROR);
@@ -736,6 +831,279 @@ void StateBufferStoreTester::watermarkTornReadTest() {
                                          StateBufferStoreCfg::MAX_READ_ITERATIONS);
     ASSERT_EVENTS_FailedReadCoherentData(2, ENTRY_A, StateBufferStore_ReadOperation::REPORT_WATERMARKS,
                                          StateBufferStoreCfg::MAX_READ_ITERATIONS);
+}
+
+// ----------------------------------------------------------------------
+// Tests: configuration
+// ----------------------------------------------------------------------
+
+void StateBufferStoreTester::perEntryDepthTest() {
+    const StateBufferStoreCfg::HistoryDepths depths;
+    // The sample configuration sets these entries to the depth bounds; the
+    // test is only meaningful while their depths differ from ENTRY_A's
+    ASSERT_EQ(depths[ENTRY_MIN_DEPTH], static_cast<FwSizeType>(StateBufferStoreCfg::MIN_HISTORY_DEPTH));
+    ASSERT_EQ(depths[ENTRY_MAX_DEPTH], static_cast<FwSizeType>(StateBufferStoreCfg::MAX_HISTORY_DEPTH));
+    ASSERT_NE(depths[ENTRY_A], depths[ENTRY_MIN_DEPTH]);
+    ASSERT_NE(depths[ENTRY_A], depths[ENTRY_MAX_DEPTH]);
+
+    const StateBufferStoreCfg::StateEntry::T entries[] = {ENTRY_MIN_DEPTH, ENTRY_A, ENTRY_MAX_DEPTH};
+    for (const StateBufferStoreCfg::StateEntry::T entry : entries) {
+        const FwSizeType depth = depths[entry];
+        // One more than the depth, so each ring wraps exactly once
+        for (FwSizeType i = 0; i <= depth; i++) {
+            this->put(entry, Fw::PolyType(static_cast<U32>(i + 1)), static_cast<U32>(i + 1));
+        }
+
+        U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH];
+        FwSizeType sizeOut = 0;
+        Fw::Buffer tooSmall(bytes, (depth * RECORD_SIZE) - 1);
+        ASSERT_EQ(this->invoke_to_getHistory(0, entry, tooSmall, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
+
+        // A buffer of exactly this entry's depth holds its whole history,
+        // which has dropped only the first value
+        Fw::Buffer exact(bytes, depth * RECORD_SIZE);
+        ASSERT_EQ(this->invoke_to_getHistory(0, entry, exact, sizeOut), SbsStatus::OK);
+        ASSERT_EQ(sizeOut, depth * RECORD_SIZE);
+        ASSERT_EQ(static_cast<U32>(this->readRecord(exact, 0).get_value()), 2u);
+        ASSERT_EQ(static_cast<U32>(this->readRecord(exact, depth - 1).get_value()), static_cast<U32>(depth + 1));
+    }
+}
+
+void StateBufferStoreTester::watermarkTypeMismatchTest() {
+    this->put(ENTRY_A, Fw::PolyType(static_cast<I32>(5)), 1);
+    // Larger and differently typed: PolyType cannot compare across types, so
+    // neither watermark moves
+    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(100)), 2);
+
+    SbsMeasurement min;
+    SbsMeasurement max;
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
+    ASSERT_TRUE(min.get_value().isI32());
+    ASSERT_TRUE(max.get_value().isI32());
+    ASSERT_EQ(static_cast<I32>(min.get_value()), 5);
+    ASSERT_EQ(static_cast<I32>(max.get_value()), 5);
+
+    // The value itself was still stored
+    ASSERT_EQ(static_cast<U32>(this->get(ENTRY_A, SbsStatus::OK)), 100u);
+
+    // Clearing is how an entry's watermarks adopt a new type
+    ASSERT_EQ(this->invoke_to_clearMinMax(0, ENTRY_A), SbsStatus::OK);
+    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(7)), 3);
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
+    ASSERT_EQ(static_cast<U32>(min.get_value()), 7u);
+    ASSERT_EQ(static_cast<U32>(max.get_value()), 7u);
+}
+
+// ----------------------------------------------------------------------
+// Tests: telemetry
+// ----------------------------------------------------------------------
+
+void StateBufferStoreTester::tlmStoreTest() {
+    // The component's own time differs from the time tags, to show that the
+    // tags are what get stored
+    this->setTestTime(Fw::Time(TimeBase::TB_WORKSTATION_TIME, 5, 0));
+
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer u32Value;
+    ASSERT_EQ(u32Value.serializeFrom(static_cast<U32>(1234)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, u32Value);
+
+    Fw::PolyType value;
+    Fw::Time measTime;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_U32, value, measTime, Fw::Time()), SbsStatus::OK);
+    ASSERT_TRUE(value.isU32());
+    ASSERT_EQ(static_cast<U32>(value), 1234u);
+    ASSERT_EQ(measTime.getSeconds(), 70u);
+
+    // A second sample feeds the watermarks and history like any put
+    Fw::Time laterTag(TimeBase::TB_WORKSTATION_TIME, 71, 0);
+    Fw::TlmBuffer lowerValue;
+    ASSERT_EQ(lowerValue.serializeFrom(static_cast<U32>(10)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, laterTag, lowerValue);
+
+    SbsMeasurement min;
+    SbsMeasurement max;
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_TLM_U32, min, max), SbsStatus::OK);
+    ASSERT_EQ(static_cast<U32>(min.get_value()), 10u);
+    ASSERT_EQ(min.get_time().getSeconds(), 71u);
+    ASSERT_EQ(static_cast<U32>(max.get_value()), 1234u);
+    ASSERT_EQ(max.get_time().getSeconds(), 70u);
+
+    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH];
+    Fw::Buffer data(bytes, sizeof bytes);
+    FwSizeType sizeOut = 0;
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_TLM_U32, data, sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, 2u * RECORD_SIZE);
+
+    // Each mapping decodes as its own type
+    Fw::TlmBuffer f32Value;
+    ASSERT_EQ(f32Value.serializeFrom(static_cast<F32>(2.5f)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_F32, tag, f32Value);
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_F32, value, measTime, Fw::Time()), SbsStatus::OK);
+    ASSERT_TRUE(value.isF32());
+    ASSERT_EQ(static_cast<F32>(value), 2.5f);
+
+    Fw::TlmBuffer boolValue;
+    ASSERT_EQ(boolValue.serializeFrom(true), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_BOOL, tag, boolValue);
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_BOOL, value, measTime, Fw::Time()), SbsStatus::OK);
+    ASSERT_TRUE(value.isBool());
+    ASSERT_TRUE(static_cast<bool>(value));
+
+    ASSERT_EVENTS_SIZE(0);
+}
+
+void StateBufferStoreTester::tlmUnmappedTest() {
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer u32Value;
+    ASSERT_EQ(u32Value.serializeFrom(static_cast<U32>(1)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_UNMAPPED, tag, u32Value);
+
+    // Nothing stored anywhere, and not an anomaly
+    ASSERT_EVENTS_SIZE(0);
+    (void)this->get(ENTRY_TLM_U32, SbsStatus::NOT_WRITTEN);
+    (void)this->get(ENTRY_TLM_F32, SbsStatus::NOT_WRITTEN);
+    (void)this->get(ENTRY_TLM_BOOL, SbsStatus::NOT_WRITTEN);
+
+    // A component configured without a mapping table stores no telemetry
+    Fw::MallocAllocator allocator;
+    StateBufferStore unmapped("unmapped");
+    unmapped.init(StateBufferStoreTester::TEST_INSTANCE_ID);
+    unmapped.configure(TEST_MEM_ID, allocator);
+    unmapped.get_tlmIn_InputPort(0)->invoke(TLM_CHAN_U32, tag, u32Value);
+    Fw::PolyType value;
+    Fw::Time measTime;
+    ASSERT_EQ(unmapped.get_getValue_InputPort(0)->invoke(ENTRY_TLM_U32, value, measTime, Fw::Time()),
+              SbsStatus::NOT_WRITTEN);
+}
+
+void StateBufferStoreTester::tlmAllTypesTest() {
+    Fw::PolyType value = storeTlmAs(SbsTlmType::TYPE_U8, static_cast<U8>(200));
+    ASSERT_TRUE(value.isU8());
+    ASSERT_EQ(static_cast<U8>(value), 200u);
+
+    value = storeTlmAs(SbsTlmType::TYPE_I8, static_cast<I8>(-100));
+    ASSERT_TRUE(value.isI8());
+    ASSERT_EQ(static_cast<I8>(value), -100);
+
+    value = storeTlmAs(SbsTlmType::TYPE_U16, static_cast<U16>(60000));
+    ASSERT_TRUE(value.isU16());
+    ASSERT_EQ(static_cast<U16>(value), 60000u);
+
+    value = storeTlmAs(SbsTlmType::TYPE_I16, static_cast<I16>(-30000));
+    ASSERT_TRUE(value.isI16());
+    ASSERT_EQ(static_cast<I16>(value), -30000);
+
+    value = storeTlmAs(SbsTlmType::TYPE_U32, static_cast<U32>(4000000000u));
+    ASSERT_TRUE(value.isU32());
+    ASSERT_EQ(static_cast<U32>(value), 4000000000u);
+
+    value = storeTlmAs(SbsTlmType::TYPE_I32, static_cast<I32>(-2000000000));
+    ASSERT_TRUE(value.isI32());
+    ASSERT_EQ(static_cast<I32>(value), -2000000000);
+
+    value = storeTlmAs(SbsTlmType::TYPE_U64, static_cast<U64>(1) << 40);
+    ASSERT_TRUE(value.isU64());
+    ASSERT_EQ(static_cast<U64>(value), static_cast<U64>(1) << 40);
+
+    value = storeTlmAs(SbsTlmType::TYPE_I64, -(static_cast<I64>(1) << 40));
+    ASSERT_TRUE(value.isI64());
+    ASSERT_EQ(static_cast<I64>(value), -(static_cast<I64>(1) << 40));
+
+    value = storeTlmAs(SbsTlmType::TYPE_F32, static_cast<F32>(-0.75f));
+    ASSERT_TRUE(value.isF32());
+    ASSERT_EQ(static_cast<F32>(value), -0.75f);
+
+    value = storeTlmAs(SbsTlmType::TYPE_F64, static_cast<F64>(1.0e100));
+    ASSERT_TRUE(value.isF64());
+    ASSERT_EQ(static_cast<F64>(value), 1.0e100);
+
+    value = storeTlmAs(SbsTlmType::TYPE_BOOL, false);
+    ASSERT_TRUE(value.isBool());
+    ASSERT_FALSE(static_cast<bool>(value));
+}
+
+void StateBufferStoreTester::tlmDecodeFailedTest() {
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+
+    // Too short for the mapped U32
+    Fw::TlmBuffer narrow;
+    ASSERT_EQ(narrow.serializeFrom(static_cast<U16>(1)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, narrow);
+
+    // Bytes left over after the mapped U32
+    Fw::TlmBuffer wide;
+    ASSERT_EQ(wide.serializeFrom(static_cast<U32>(1)), Fw::FW_SERIALIZE_OK);
+    ASSERT_EQ(wide.serializeFrom(static_cast<U8>(2)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, wide);
+
+    ASSERT_EVENTS_SIZE(2);
+    ASSERT_EVENTS_TlmDecodeFailed_SIZE(2);
+    ASSERT_EVENTS_TlmDecodeFailed(0, TLM_CHAN_U32, ENTRY_TLM_U32, SbsTlmType::TYPE_U32, sizeof(U16));
+    ASSERT_EVENTS_TlmDecodeFailed(1, TLM_CHAN_U32, ENTRY_TLM_U32, SbsTlmType::TYPE_U32, sizeof(U32) + sizeof(U8));
+    (void)this->get(ENTRY_TLM_U32, SbsStatus::NOT_WRITTEN);
+}
+
+void StateBufferStoreTester::tlmEntryRefusesDataTest() {
+    U8 stored[] = {'t', 'l', 'm'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_TLM_U32, in, SbsStatus::OK), SbsStatus::WRONG_KIND);
+}
+
+// ----------------------------------------------------------------------
+// Tests: programming errors
+// ----------------------------------------------------------------------
+
+void StateBufferStoreTester::unconfiguredDeathTest() {
+    ASSERT_DEATH_IF_SUPPORTED(readUnconfigured(), "StateBufferStore.cpp");
+}
+
+void StateBufferStoreTester::configureTwiceDeathTest() {
+    ASSERT_DEATH_IF_SUPPORTED(this->component.configure(TEST_MEM_ID, this->m_allocator), "StateBufferStore.cpp");
+}
+
+void StateBufferStoreTester::nHistoryTooDeepDeathTest() {
+    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH];
+    Fw::Buffer data(bytes, sizeof bytes);
+    FwSizeType sizeOut = 0;
+    ASSERT_DEATH_IF_SUPPORTED(this->invoke_to_getNHistory(0, ENTRY_A, static_cast<U16>(DEPTH + 1), data, sizeOut),
+                              "StateBufferStore.cpp");
+}
+
+void StateBufferStoreTester::oversizedPutDataDeathTest() {
+    U8 stored[StateBufferStoreCfg::MAX_DATA_SIZE + 1] = {};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_DEATH_IF_SUPPORTED(this->invoke_to_putData(0, ENTRY_A, in, SbsStatus::OK), "StateBufferStore.cpp");
+}
+
+void StateBufferStoreTester::untypedPutDeathTest() {
+    Fw::PolyType untyped;
+    ASSERT_DEATH_IF_SUPPORTED(this->invoke_to_putValue(0, ENTRY_A, untyped, SbsStatus::OK), "StateBufferStore.cpp");
+}
+
+void StateBufferStoreTester::tlmMappingDeathTest() {
+    SbsTlmMapping duplicateChannel[] = {
+        SbsTlmMapping(TLM_CHAN_U32, StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, SbsTlmType::TYPE_U32),
+        SbsTlmMapping(TLM_CHAN_U32, StateBufferStoreCfg::StateEntry::SBS_ENTRY_01, SbsTlmType::TYPE_U32),
+    };
+    ASSERT_DEATH_IF_SUPPORTED(configureWithMappings(duplicateChannel, FW_NUM_ARRAY_ELEMENTS(duplicateChannel)),
+                              "StateBufferStore.cpp");
+
+    SbsTlmMapping duplicateEntry[] = {
+        SbsTlmMapping(TLM_CHAN_U32, StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, SbsTlmType::TYPE_U32),
+        SbsTlmMapping(TLM_CHAN_F32, StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, SbsTlmType::TYPE_F32),
+    };
+    ASSERT_DEATH_IF_SUPPORTED(configureWithMappings(duplicateEntry, FW_NUM_ARRAY_ELEMENTS(duplicateEntry)),
+                              "StateBufferStore.cpp");
+
+    SbsTlmMapping sizingCounter[] = {
+        SbsTlmMapping(TLM_CHAN_U32, StateBufferStoreCfg::StateEntry::NUM_ENTRIES, SbsTlmType::TYPE_U32),
+    };
+    ASSERT_DEATH_IF_SUPPORTED(configureWithMappings(sizingCounter, FW_NUM_ARRAY_ELEMENTS(sizingCounter)),
+                              "StateBufferStore.cpp");
+
+    // A well-formed table configures cleanly
+    configureWithMappings(TLM_MAPPINGS, FW_NUM_ARRAY_ELEMENTS(TLM_MAPPINGS));
 }
 
 }  // namespace Svc

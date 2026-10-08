@@ -42,10 +42,11 @@ derives from in the heritage module's specification.
 | REQ-STATEBUFFERSTORE-010 | HER-0017, .0018 | `Svc::StateBufferStore` shall store, for each entry independently, a configuration-specified history depth of at least two measurements, in memory obtained once from an `Fw::MemAllocator`, and shall overwrite the oldest measurement when the history is full. | Unit Test |
 | REQ-STATEBUFFERSTORE-011 | HER-0020, .0021, .0022 | `Svc::StateBufferStore` shall store measurements of the primitive types `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `F32`, and `F64`, and shall store structures and fixed-length strings up to a configured maximum size. `U64`, `I64`, and `bool` are also accepted, as `Fw::PolyType` carries them. | Unit Test |
 | REQ-STATEBUFFERSTORE-012 | HER-0023 | `Svc::StateBufferStore` shall time tag every stored measurement with the time obtained from its time port at the moment of storage. | Unit Test |
-| REQ-STATEBUFFERSTORE-013 | derived | `Svc::StateBufferStore` shall report `NOT_WRITTEN` for an entry never stored to, and `NOT_FRESH` when the measurement has not changed since the caller's previous read. | Unit Test |
+| REQ-STATEBUFFERSTORE-013 | derived | `Svc::StateBufferStore` shall report `NOT_WRITTEN` for an entry never stored to, and `NOT_FRESH` when the measurement has not changed since the caller's previous read; a caller supplying no previous read time (`Fw::ZERO_TIME`) shall not be checked for freshness. | Unit Test |
 | REQ-STATEBUFFERSTORE-014 | derived (#5067) | `Svc::StateBufferStore` shall detect a measurement, watermark, or history read concurrently with a write, retry the read up to a configured number of attempts, and on exhaustion emit a FATAL event identifying the read and report `INCOHERENT` without copying out the read data. | Unit Test |
 | REQ-STATEBUFFERSTORE-015 | derived | `Svc::StateBufferStore` shall perform every store and read operation without dynamic memory allocation after configuration and in bounded time. | Inspection |
 | REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it. | Unit Test |
+| REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, storing nothing, when a mapped value does not decode as its type. | Unit Test |
 
 Heritage requirements HER-0001, .0002, and .0003 govern shared-memory
 allocation across space partitions and initialization order between them.
@@ -56,18 +57,20 @@ Space partitioning is out of scope for this component, so they are not ported.
 ### 3.1 Component diagram
 
 ```
-                   +----------------------------+
-   putValue  ----->|                            |
-   getValue  <---->|                            |
-   putData   ----->|                            |
-   getData   <---->|    Svc::StateBufferStore   |<----- timeCaller
-   getMinMax <---->|                            |
-   getHistory <--->|                            |-----> eventOut
-   getNHistory <-->|                            |
-                   |  (privileged)              |<----- cmdIn
-   clearMinMax ---->|                           |-----> cmdResponseOut
-   clearAndGetMinMax <->|                       |
-                   +----------------------------+
+                          +-------------------------+
+   putValue          ---->|                         |<---- timeCaller
+   getValue          <--->|                         |
+   putData           ---->|                         |----> eventOut
+   getData           <--->|                         |
+   getMinMax         <--->|  Svc::StateBufferStore  |<---- cmdIn
+   getHistory        <--->|                         |----> cmdResponseOut
+   getNHistory       <--->|                         |
+   tlmIn             ---->|                         |
+                          |                         |
+   (privileged)           |                         |
+   clearMinMax       <--->|                         |
+   clearAndGetMinMax <--->|                         |
+                          +-------------------------+
 ```
 
 ### 3.2 Port kinds and concurrency
@@ -164,6 +167,13 @@ controlled by topology wiring**: connect them only to the component responsible
 for reporting and resetting watermarks. The `CLEAR_WATERMARKS` command provides
 the same capability to ground.
 
+`REPORT_WATERMARKS` and `CLEAR_WATERMARKS` reject an entry argument naming the
+`NUM_ENTRIES` sizing counter (`VALIDATION_ERROR`) or a data entry
+(`EXECUTION_ERROR`), emitting the warning-low `ReportWatermarksRejected` or
+`ClearWatermarksRejected` event with the reason. A `REPORT_WATERMARKS` whose
+read stays torn fails with `EXECUTION_ERROR`; the `FailedReadCoherentData`
+event it emits names the command.
+
 ### 3.6 Status reporting
 
 `SbsStatus` preserves the heritage status enumeration's values 0-5 so that ported
@@ -191,6 +201,21 @@ Three heritage behaviors were deliberately changed:
   F Prime-idiomatic response. The value is retained in the enumeration for
   requirement traceability.
 
+Two further heritage differences follow from the design rather than from a
+decision to diverge:
+
+- **`NOT_WRITTEN` comes from a stored count, not a zero timestamp.** The
+  heritage `get` treated a zero timestamp as "never written". This component
+  counts the measurements each entry has stored, which also tells history reads
+  how many records exist. A measurement legitimately stamped with zero time —
+  for instance, when `timeCaller` is unconnected — is therefore still reported
+  as written.
+- **Full-history reads are chronological.** The heritage `get_history` dumped
+  the ring in raw slot order, leaving the caller to find the oldest slot.
+  `getHistory` returns measurements oldest first, the same order as
+  `getNHistory` and the heritage `get_n_history_measurements`, so the two
+  history reads differ only in how they treat a short buffer.
+
 ### 3.7 Event reporting of values
 
 FPP cannot carry `Fw::PolyType` or `Fw::Time` in an event — neither is a
@@ -200,6 +225,39 @@ and reduces times to microseconds, following the `I64` microsecond convention in
 the event; the `getMinMax` port reports them exactly, and is the interface to
 use when precision matters.
 
+### 3.8 Telemetry
+
+`tlmIn` is a standard `Fw.Tlm` port, so a component's autocoded telemetry
+output can be connected to it directly, alongside or instead of a telemetry
+channel database. The topology passes `configure()` a table of `SbsTlmMapping`
+rows, each naming a channel ID, the entry that stores it, and the `SbsTlmType`
+its value is serialized as. A future autocoder would generate this table from
+the deployment's channels (§7); until then it is written by hand, which is why
+it belongs to the deployment rather than to `StateBufferStoreCfg.fpp`: channel
+IDs are assigned per deployment.
+
+A received channel found in the table is decoded into an `Fw::PolyType` of its
+mapped type and stored exactly as `putValue` stores a value, so it gains
+watermarks and history. Two things differ from `putValue`:
+
+- The measurement is time tagged with the telemetry's own time tag, not with
+  `timeCaller`, because the tag records when the value was sampled. This is the
+  client-supplied timestamp #5067 describes; `putValue` remains
+  component-stamped.
+- The validity recorded is always `OK`, as telemetry carries none.
+
+A channel not in the table is ignored without comment: a component's telemetry
+port carries all of its channels, and the store holds only those mapped. A
+mapped value that fails to decode — too short, or with bytes left over — means
+the table disagrees with the channel's definition; it is not stored, and the
+throttled `TlmDecodeFailed` warning reports it. Lookup is a linear scan of the
+table, bounded by its size.
+
+`configure()` asserts that no channel and no entry appears twice in the table,
+since either would interleave unrelated values in one history, and fixes every
+mapped entry as a value entry, so a data put to it is refused even before its
+channel first arrives. The table must outlive the component.
+
 ## 4. Configuration
 
 `config/StateBufferStoreCfg.fpp` defines:
@@ -207,9 +265,10 @@ use when precision matters.
 | Name | Meaning |
 |---|---|
 | `StateEntry` | The set of stored entries. `NUM_ENTRIES` is a required last member used to size the entry tables; it is not an addressable entry, and commands naming it are rejected. |
-| `HistoryDepths` | Per-entry history depth. Each must be in `[2, MAX_HISTORY_DEPTH]`, asserted by `configure()`. |
+| `HistoryDepths` | Per-entry history depth, one element per entry. Each must be in `[MIN_HISTORY_DEPTH, MAX_HISTORY_DEPTH]`, asserted by `configure()`. The sample sets its last two entries to the two bounds. |
+| `MIN_HISTORY_DEPTH` | Lower bound on any entry's depth: 2, per REQ-STATEBUFFERSTORE-010. |
 | `MAX_HISTORY_DEPTH` | Upper bound on any entry's depth. |
-| `DEFAULT_HISTORY_DEPTH` | Depth applied to entries not individually overridden. |
+| `DEFAULT_HISTORY_DEPTH` | Typical depth, used by the sample for most entries. |
 | `MAX_DATA_SIZE` | Maximum size of a string, structure, or byte-array measurement. |
 | `MAX_READ_ITERATIONS` | Read attempts before reporting `INCOHERENT`. |
 
@@ -237,6 +296,19 @@ Fw::MallocAllocator stateBufferStoreAllocator;
 stateBufferStore.configure(0, stateBufferStoreAllocator);
 ```
 
+To also store telemetry, pass a mapping table that outlives the component:
+
+```c++
+Svc::SbsTlmMapping stateBufferStoreTlm[] = {
+    Svc::SbsTlmMapping(myChannelId, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_00,
+                       Svc::SbsTlmType::TYPE_F32),
+};
+
+stateBufferStore.configure(0, stateBufferStoreAllocator,
+                           Fw::ExternalArray<Svc::SbsTlmMapping>(stateBufferStoreTlm,
+                                                                 FW_NUM_ARRAY_ELEMENTS(stateBufferStoreTlm)));
+```
+
 A producer declares an output port of type `Svc.SbsPut` and a consumer one of
 type `Svc.SbsGet`; the call names below follow whatever those ports are named in
 the using component's FPP:
@@ -259,6 +331,10 @@ const Svc::SbsStatus status =
 
 Retaining the previous `measTime` as `lastReadTime` on the next call is what
 produces `NOT_FRESH`, letting a consumer skip values it has already processed.
+`lastReadTime` is optional, as in the heritage interface, which accepted `NULL`:
+passing `Fw::ZERO_TIME` skips the freshness check, so a consumer that does not
+track freshness never sees `NOT_FRESH`. A measurement stamped with zero time can
+therefore never be reported `NOT_FRESH`.
 Freshness is judged by timestamp, so two stores within one tick of the time
 source look identical to a reader, and a component whose `timeCaller` is
 unconnected stamps every measurement with zero time.
@@ -284,9 +360,15 @@ unconnected stamps every measurement with zero time.
 
 ## 7. Deferred work
 
-- An autocoder generating entry identifiers, a telemetry-ID-to-entry-ID table,
-  and history offsets, as proposed in #5067. Configuration is written by hand
-  for now, as `Svc::PolyDb`'s is.
+- An autocoder generating entry identifiers, the telemetry mapping table of
+  §3.8, and history offsets, as proposed in #5067. Configuration and the
+  mapping table are written by hand for now, as `Svc::PolyDb`'s configuration
+  is.
+- Clearing the watermarks of all entries at once. #5067 has watermarks
+  "cleared in response to a command or input port, either for individual
+  entries or for all entries in the database"; `clearMinMax`,
+  `clearAndGetMinMax`, and `CLEAR_WATERMARKS` each take one entry, so clearing
+  every entry takes one call per entry.
 - Data product reporting: dumping all watermarks, or an entry's full history,
   as a data product rather than over a port.
 - Encoding access permissions in entry identifiers (#5067), which would let the
@@ -294,9 +376,35 @@ unconnected stamps every measurement with zero time.
 - Topology integration. No deployment in this repository instantiates this
   component (nor `Svc::PolyDb`), so there is no integration test suite.
 
-## 8. Change log
+## 8. Unit test coverage
+
+The unit tests cover 98% of the lines of `StateBufferStore.cpp` (496 of 505)
+and every function. gcovr counts 55.6% of branches (835 of 1502); most of the
+remainder are the failure branches of `FW_ASSERT`s and of code generated by the
+compiler, in line with comparable components such as `Svc::TimeConverter`.
+
+The uncovered lines are:
+
+- Paths reached only when a writer interleaves with a reader on another thread,
+  which a single-threaded test cannot arrange: clamping a torn payload size,
+  a history serialization that fails on a torn copy, and an entry whose kind is
+  claimed during a watermark read. The retry and `INCOHERENT` paths themselves
+  are covered through a test-only hook that forces torn reads.
+- The `default` case of the telemetry type switch, unreachable because the
+  generated `SbsTlmType` asserts on construction from an undefined value.
+
+The assertion paths — use before `configure()`, configuring twice, an
+N-measurement read deeper than the entry, an oversized data put, an untyped
+value, and a malformed telemetry table — are verified by death tests. Death
+tests run in a child process that exits through the assertion, so they do not
+contribute to the coverage figures. A short allocation is not tested: the
+component requests memory with `Fw::MemAllocator::checkedAllocate`, which
+asserts inside `Fw` before the component sees the result.
+
+## 9. Change log
 
 | Date | Description |
 |---|---|
 | 2026-10-05 | Initial version, ported from a heritage state buffer store module |
 | 2026-10-07 | Sequence-lock coherency covering watermarks and whole history dumps; entry kinds; `SbsMeasurement` history records; explicit allocator in `configure()` |
+| 2026-10-07 | `tlmIn` telemetry port with a `configure()` mapping table; per-entry depth bounds in the sample configuration; coverage section |

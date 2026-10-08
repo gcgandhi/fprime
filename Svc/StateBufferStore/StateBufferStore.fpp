@@ -15,6 +15,12 @@ module Svc {
             REPORT_WATERMARKS      @< REPORT_WATERMARKS command
         }
 
+        @ Why a watermark command was rejected
+        enum WatermarkRejection : U8 {
+            NOT_AN_ENTRY  @< the entry named is the NUM_ENTRIES sizing counter
+            DATA_ENTRY    @< the entry holds data, which has no watermarks
+        }
+
         # ----------------------------------------------------------------------
         # Store interface
         #
@@ -43,6 +49,11 @@ module Svc {
 
         @ Port getting an entry's most recent N measurements
         sync input port getNHistory: SbsGetNHistory
+
+        @ Port receiving telemetry. Channels in the mapping table given to
+        @ configure() are decoded and stored in their mapped entry, stamped
+        @ with the sender's time tag; all other channels are ignored
+        sync input port tlmIn: Fw.Tlm
 
         # ----------------------------------------------------------------------
         # Privileged store interface
@@ -136,6 +147,38 @@ module Svc {
         severity activity high \
         id 0x02 \
         format "Cleared watermarks for entry {}"
+
+        @ A mapped telemetry value did not decode as its mapping's type, so it
+        @ was not stored. Indicates a mapping table that disagrees with the
+        @ channel's definition.
+        event TlmDecodeFailed(
+            chanId: FwChanIdType                    @< the channel received
+            $entry: StateBufferStoreCfg.StateEntry  @< the entry it maps to
+            valueType: SbsTlmType                   @< the type it was decoded as
+            numBytes: FwSizeType                    @< bytes received
+        ) \
+        severity warning high \
+        id 0x03 \
+        format "Telemetry channel {} for entry {} did not decode as {} from {} bytes; not stored" \
+        throttle 10
+
+        @ A REPORT_WATERMARKS command was rejected without reporting
+        event ReportWatermarksRejected(
+            $entry: StateBufferStoreCfg.StateEntry  @< the entry named
+            reason: WatermarkRejection              @< why it was rejected
+        ) \
+        severity warning low \
+        id 0x04 \
+        format "REPORT_WATERMARKS for entry {} rejected: {}"
+
+        @ A CLEAR_WATERMARKS command was rejected without clearing
+        event ClearWatermarksRejected(
+            $entry: StateBufferStoreCfg.StateEntry  @< the entry named
+            reason: WatermarkRejection              @< why it was rejected
+        ) \
+        severity warning low \
+        id 0x05 \
+        format "CLEAR_WATERMARKS for entry {} rejected: {}"
 
     }
 

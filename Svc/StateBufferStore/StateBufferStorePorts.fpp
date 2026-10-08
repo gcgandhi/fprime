@@ -30,6 +30,30 @@ module Svc {
         value: Fw.PolyType          @< the measurement value
     }
 
+    @ How a telemetry channel's serialized value is decoded for storage
+    enum SbsTlmType: U8 {
+        TYPE_U8    @< U8 value
+        TYPE_I8    @< I8 value
+        TYPE_U16   @< U16 value
+        TYPE_I16   @< I16 value
+        TYPE_U32   @< U32 value
+        TYPE_I32   @< I32 value
+        TYPE_U64   @< U64 value
+        TYPE_I64   @< I64 value
+        TYPE_F32   @< F32 value
+        TYPE_F64   @< F64 value
+        TYPE_BOOL  @< bool value
+    }
+
+    @ Maps one telemetry channel to the entry that stores it.
+    @ A table of these is passed to StateBufferStore::configure; a future
+    @ autocoder would generate it from the deployment's channels.
+    struct SbsTlmMapping {
+        chanId: FwChanIdType                    @< telemetry channel ID
+        $entry: StateBufferStoreCfg.StateEntry  @< entry storing the channel
+        valueType: SbsTlmType                   @< how the channel's value is serialized
+    }
+
     @ Store a primitive measurement, timestamped by the component.
     @ Reports WRONG_KIND and stores nothing if the entry holds data
     port SbsPut(
@@ -43,7 +67,7 @@ module Svc {
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to read
         ref val: Fw.PolyType                    @< populated with the latest value
         ref measTime: Fw.Time                   @< populated with the measurement time
-        lastReadTime: Fw.Time                   @< caller's previous read time; drives NOT_FRESH
+        lastReadTime: Fw.Time                   @< caller's previous read time, or Fw::ZERO_TIME for none; drives NOT_FRESH
     ) -> SbsStatus
 
     @ Get the minimum and maximum measurements recorded for an entry
@@ -102,7 +126,7 @@ module Svc {
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to read
         ref data: Fw.Buffer                     @< filled with the latest value
         ref measTime: Fw.Time                   @< populated with the measurement time
-        lastReadTime: Fw.Time                   @< caller's previous read time; drives NOT_FRESH
+        lastReadTime: Fw.Time                   @< caller's previous read time, or Fw::ZERO_TIME for none; drives NOT_FRESH
         ref sizeOut: FwSizeType                 @< bytes written to data
     ) -> SbsStatus
 

@@ -8,7 +8,9 @@
 
 #include <atomic>
 
+#include "Fw/DataStructures/ExternalArray.hpp"
 #include "Fw/Types/MemAllocator.hpp"
+#include "Svc/StateBufferStore/SbsTlmMappingSerializableAc.hpp"
 #include "Svc/StateBufferStore/StateBufferStoreComponentAc.hpp"
 #include "config/FppConstantsAc.hpp"
 #include "config/HistoryDepthsArrayAc.hpp"
@@ -28,11 +30,22 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Destroy StateBufferStore object, releasing the measurement history
     ~StateBufferStore();
 
-    //! Allocate the measurement history
+    //! Allocate the measurement history, storing no telemetry
     //!
     //! Must be called once, after construction and before any port is invoked.
     void configure(FwEnumStoreType memId,       //!< Identifier used when dealing with the Fw::MemAllocator
                    Fw::MemAllocator& allocator  //!< Allocator for the history. MUST outlive the component.
+    );
+
+    //! Allocate the measurement history and set the telemetry channels to store
+    //!
+    //! Must be called once, after construction and before any port is invoked.
+    //! Each mapped entry becomes a value entry. Channel IDs and entries must
+    //! each appear at most once in tlmMappings.
+    void configure(
+        FwEnumStoreType memId,                               //!< Identifier used when dealing with the Fw::MemAllocator
+        Fw::MemAllocator& allocator,                         //!< Allocator for the history. MUST outlive the component.
+        const Fw::ExternalArray<SbsTlmMapping>& tlmMappings  //!< Channels to store. MUST outlive the component.
     );
 
   private:
@@ -137,6 +150,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
                                        Fw::Buffer& data,
                                        FwSizeType& sizeOut) override;
 
+    //! Handler implementation for tlmIn
+    void tlmIn_handler(FwIndexType portNum, FwChanIdType id, Fw::Time& timeTag, Fw::TlmBuffer& val) override;
+
     // ----------------------------------------------------------------------
     // Handler implementations for commands
     // ----------------------------------------------------------------------
@@ -177,6 +193,14 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Report whether the read attempt begun with before saw a coherent entry
     static bool endRead(const Entry& entry, U32 before);
+
+    //! Store a value in a value entry, as one write
+    static void storeValue(Entry& entry, const Fw::PolyType& val, const Fw::Time& time, const SbsStatus& validity);
+
+    //! Decode a serialized telemetry value as the given type
+    //!
+    //! Fails unless val holds exactly one value of that type.
+    static Fw::SerializeStatus decodeTlm(const SbsTlmType& type, Fw::TlmBuffer& val, Fw::PolyType& out);
 
     //! Update an entry's watermarks with a newly stored value, within a write
     static void updateWatermarks(Entry& entry,
@@ -235,6 +259,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Allocator that provided m_memPtr, retained for deallocation
     Fw::MemAllocator* m_allocator;
+
+    //! Telemetry channels stored, and the entry each is stored in
+    Fw::ExternalArray<SbsTlmMapping> m_tlmMappings;
 
     //! Whether configure() has run
     bool m_initialized;

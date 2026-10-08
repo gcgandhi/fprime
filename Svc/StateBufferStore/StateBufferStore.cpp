@@ -9,6 +9,7 @@
 #include <new>
 
 #include "Fw/Types/Assert.hpp"
+#include "Fw/Types/SerialBuffer.hpp"
 
 namespace Svc {
 
@@ -20,6 +21,17 @@ constexpr I64 US_PER_SECOND = 1000000;
 //! Bytes a single measurement occupies in a history buffer: one serialized
 //! SbsMeasurement, so that ground tools can decode a dump with the FPP type
 constexpr FwSizeType HISTORY_RECORD_SIZE = SbsMeasurement::SERIALIZED_SIZE;
+
+//! Deserialize one value of type T into a PolyType
+template <typename T>
+Fw::SerializeStatus decodeAs(Fw::SerialBuffer& reader, Fw::PolyType& out) {
+    T value{};
+    const Fw::SerializeStatus status = reader.deserializeTo(value);
+    if (status == Fw::FW_SERIALIZE_OK) {
+        out = Fw::PolyType(value);
+    }
+    return status;
+}
 
 }  // namespace
 
@@ -60,7 +72,29 @@ StateBufferStore::~StateBufferStore() {
 }
 
 void StateBufferStore::configure(FwEnumStoreType memId, Fw::MemAllocator& allocator) {
+    this->configure(memId, allocator, Fw::ExternalArray<SbsTlmMapping>());
+}
+
+void StateBufferStore::configure(FwEnumStoreType memId,
+                                 Fw::MemAllocator& allocator,
+                                 const Fw::ExternalArray<SbsTlmMapping>& tlmMappings) {
     FW_ASSERT(not this->m_initialized);
+
+    // Validated before allocating, so a bad table fails without a dangling allocation
+    for (FwSizeType i = 0; i < tlmMappings.getSize(); i++) {
+        const SbsTlmMapping& mapping = tlmMappings[i];
+        const FwSizeType index = static_cast<FwSizeType>(mapping.get_entry());
+        FW_ASSERT(index < StateBufferStoreCfg::StateEntry::NUM_ENTRIES, static_cast<FwAssertArgType>(index),
+                  static_cast<FwAssertArgType>(i));
+        // A channel stored twice, or two channels sharing an entry, would
+        // interleave unrelated values in one history
+        for (FwSizeType j = 0; j < i; j++) {
+            FW_ASSERT(tlmMappings[j].get_chanId() != mapping.get_chanId(),
+                      static_cast<FwAssertArgType>(mapping.get_chanId()), static_cast<FwAssertArgType>(i));
+            FW_ASSERT(tlmMappings[j].get_entry() != mapping.get_entry(), static_cast<FwAssertArgType>(index),
+                      static_cast<FwAssertArgType>(i));
+        }
+    }
 
     const StateBufferStoreCfg::HistoryDepths depths;
 
@@ -71,7 +105,8 @@ void StateBufferStore::configure(FwEnumStoreType memId, Fw::MemAllocator& alloca
     FwSizeType totalPayloadBytes = 0;
     for (FwSizeType i = 0; i < StateBufferStoreCfg::StateEntry::NUM_ENTRIES; i++) {
         const FwSizeType depth = depths[i];
-        FW_ASSERT(depth >= 2, static_cast<FwAssertArgType>(depth), static_cast<FwAssertArgType>(i));
+        FW_ASSERT(depth >= StateBufferStoreCfg::MIN_HISTORY_DEPTH, static_cast<FwAssertArgType>(depth),
+                  static_cast<FwAssertArgType>(i));
         FW_ASSERT(depth <= StateBufferStoreCfg::MAX_HISTORY_DEPTH, static_cast<FwAssertArgType>(depth),
                   static_cast<FwAssertArgType>(i));
         this->m_entries[i].depth = depth;
@@ -106,6 +141,14 @@ void StateBufferStore::configure(FwEnumStoreType memId, Fw::MemAllocator& alloca
     }
     FW_ASSERT(cursor <= base + this->m_memSize, static_cast<FwAssertArgType>(cursor - base),
               static_cast<FwAssertArgType>(this->m_memSize));
+
+    // Mapped entries are value entries from the start, so a data put to one
+    // is refused even before its channel first arrives
+    for (FwSizeType i = 0; i < tlmMappings.getSize(); i++) {
+        this->m_entries[static_cast<FwSizeType>(tlmMappings[i].get_entry())].kind.store(KIND_VALUE,
+                                                                                        std::memory_order_relaxed);
+    }
+    this->m_tlmMappings = tlmMappings;
 
     this->m_initialized = true;
 }
@@ -166,6 +209,75 @@ bool StateBufferStore::endRead(const Entry& entry, U32 before) {
     // An odd count means the copy began mid-write; a changed one means a write
     // began during it. Either way the bytes may mix two measurements.
     return ((before % 2U) == 0U) and (before == after);
+}
+
+void StateBufferStore::storeValue(Entry& entry,
+                                  const Fw::PolyType& val,
+                                  const Fw::Time& time,
+                                  const SbsStatus& validity) {
+    StateBufferStore::beginWrite(entry);
+    const FwSizeType slot = (entry.latest + 1) % entry.depth;
+    entry.history[slot].time = time;
+    entry.history[slot].value = val;
+    entry.history[slot].validity = validity;
+    entry.history[slot].dataSize = 0;
+    entry.latest = slot;
+    if (entry.stored < entry.depth) {
+        entry.stored++;
+    }
+    StateBufferStore::updateWatermarks(entry, val, time, validity);
+    StateBufferStore::endWrite(entry);
+}
+
+Fw::SerializeStatus StateBufferStore::decodeTlm(const SbsTlmType& type, Fw::TlmBuffer& val, Fw::PolyType& out) {
+    // Read through a separate view so the caller's buffer is left as received
+    Fw::SerialBuffer reader(val.getBuffAddr(), val.getSize());
+    reader.fill();
+    Fw::SerializeStatus status = Fw::FW_SERIALIZE_OK;
+    switch (type.e) {
+        case SbsTlmType::TYPE_U8:
+            status = decodeAs<U8>(reader, out);
+            break;
+        case SbsTlmType::TYPE_I8:
+            status = decodeAs<I8>(reader, out);
+            break;
+        case SbsTlmType::TYPE_U16:
+            status = decodeAs<U16>(reader, out);
+            break;
+        case SbsTlmType::TYPE_I16:
+            status = decodeAs<I16>(reader, out);
+            break;
+        case SbsTlmType::TYPE_U32:
+            status = decodeAs<U32>(reader, out);
+            break;
+        case SbsTlmType::TYPE_I32:
+            status = decodeAs<I32>(reader, out);
+            break;
+        case SbsTlmType::TYPE_U64:
+            status = decodeAs<U64>(reader, out);
+            break;
+        case SbsTlmType::TYPE_I64:
+            status = decodeAs<I64>(reader, out);
+            break;
+        case SbsTlmType::TYPE_F32:
+            status = decodeAs<F32>(reader, out);
+            break;
+        case SbsTlmType::TYPE_F64:
+            status = decodeAs<F64>(reader, out);
+            break;
+        case SbsTlmType::TYPE_BOOL:
+            status = decodeAs<bool>(reader, out);
+            break;
+        default:
+            // The generated enum asserts on construction from an undefined value
+            FW_ASSERT(0, static_cast<FwAssertArgType>(type.e));
+            break;
+    }
+    // Leftover bytes mean the channel is wider than its mapping says
+    if ((status == Fw::FW_SERIALIZE_OK) and (reader.getDeserializeSizeLeft() != 0)) {
+        status = Fw::FW_DESERIALIZE_SIZE_MISMATCH;
+    }
+    return status;
 }
 
 void StateBufferStore::updateWatermarks(Entry& entry,
@@ -404,19 +516,7 @@ SbsStatus StateBufferStore::putValue_handler(FwIndexType portNum,
     if (not StateBufferStore::claimKind(record, KIND_VALUE)) {
         return SbsStatus::WRONG_KIND;
     }
-
-    StateBufferStore::beginWrite(record);
-    const FwSizeType slot = (record.latest + 1) % record.depth;
-    record.history[slot].time = now;
-    record.history[slot].value = val;
-    record.history[slot].validity = validity;
-    record.history[slot].dataSize = 0;
-    record.latest = slot;
-    if (record.stored < record.depth) {
-        record.stored++;
-    }
-    StateBufferStore::updateWatermarks(record, val, now, validity);
-    StateBufferStore::endWrite(record);
+    StateBufferStore::storeValue(record, val, now, validity);
     return SbsStatus::OK;
 }
 
@@ -455,7 +555,8 @@ SbsStatus StateBufferStore::getValue_handler(FwIndexType portNum,
     if (stored == 0) {
         return SbsStatus::NOT_WRITTEN;
     }
-    if (measurement.time == lastReadTime) {
+    // Fw::ZERO_TIME stands in for the heritage NULL: no previous read to compare against
+    if ((lastReadTime != Fw::ZERO_TIME) and (measurement.time == lastReadTime)) {
         return SbsStatus::NOT_FRESH;
     }
     return measurement.validity;
@@ -541,7 +642,8 @@ SbsStatus StateBufferStore::getData_handler(FwIndexType portNum,
     if (stored == 0) {
         return SbsStatus::NOT_WRITTEN;
     }
-    if (measurement.time == lastReadTime) {
+    // Fw::ZERO_TIME stands in for the heritage NULL: no previous read to compare against
+    if ((lastReadTime != Fw::ZERO_TIME) and (measurement.time == lastReadTime)) {
         return SbsStatus::NOT_FRESH;
     }
     return measurement.validity;
@@ -609,6 +711,25 @@ SbsStatus StateBufferStore::getNHistory_handler(FwIndexType portNum,
     return this->readHistory(record, count, StateBufferStore_ReadOperation::GET_N_HISTORY, data, sizeOut);
 }
 
+void StateBufferStore::tlmIn_handler(FwIndexType portNum, FwChanIdType id, Fw::Time& timeTag, Fw::TlmBuffer& val) {
+    FW_ASSERT(this->m_initialized);
+    // A component's telemetry port carries all of its channels, so channels
+    // without a mapping are expected here and are not stored
+    for (FwSizeType i = 0; i < this->m_tlmMappings.getSize(); i++) {
+        const SbsTlmMapping& mapping = this->m_tlmMappings[i];
+        if (mapping.get_chanId() == id) {
+            Fw::PolyType value;
+            if (StateBufferStore::decodeTlm(mapping.get_valueType(), val, value) != Fw::FW_SERIALIZE_OK) {
+                this->log_WARNING_HI_TlmDecodeFailed(id, mapping.get_entry(), mapping.get_valueType(), val.getSize());
+                return;
+            }
+            // Telemetry carries its own time tag, which is when the value was sampled
+            StateBufferStore::storeValue(this->checkedEntry(mapping.get_entry()), value, timeTag, SbsStatus::OK);
+            return;
+        }
+    }
+}
+
 // ----------------------------------------------------------------------
 // Handler implementations for commands
 // ----------------------------------------------------------------------
@@ -617,6 +738,7 @@ void StateBufferStore::REPORT_WATERMARKS_cmdHandler(FwOpcodeType opCode,
                                                     U32 cmdSeq,
                                                     const StateBufferStoreCfg::StateEntry& entry) {
     if (static_cast<FwSizeType>(entry.e) >= StateBufferStoreCfg::StateEntry::NUM_ENTRIES) {
+        this->log_WARNING_LO_ReportWatermarksRejected(entry, StateBufferStore_WatermarkRejection::NOT_AN_ENTRY);
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
@@ -625,7 +747,13 @@ void StateBufferStore::REPORT_WATERMARKS_cmdHandler(FwOpcodeType opCode,
     SbsMeasurement max;
     const SbsStatus status = this->readWatermarks(this->checkedEntry(entry), false,
                                                   StateBufferStore_ReadOperation::REPORT_WATERMARKS, min, max);
-    if ((status == SbsStatus::WRONG_KIND) or (status == SbsStatus::INCOHERENT)) {
+    if (status == SbsStatus::WRONG_KIND) {
+        this->log_WARNING_LO_ReportWatermarksRejected(entry, StateBufferStore_WatermarkRejection::DATA_ENTRY);
+        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
+        return;
+    }
+    // readWatermarks has already emitted FailedReadCoherentData naming this command
+    if (status == SbsStatus::INCOHERENT) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
     }
@@ -641,10 +769,12 @@ void StateBufferStore::CLEAR_WATERMARKS_cmdHandler(FwOpcodeType opCode,
                                                    U32 cmdSeq,
                                                    const StateBufferStoreCfg::StateEntry& entry) {
     if (static_cast<FwSizeType>(entry.e) >= StateBufferStoreCfg::StateEntry::NUM_ENTRIES) {
+        this->log_WARNING_LO_ClearWatermarksRejected(entry, StateBufferStore_WatermarkRejection::NOT_AN_ENTRY);
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
     if (this->clearMinMax_handler(0, entry) == SbsStatus::WRONG_KIND) {
+        this->log_WARNING_LO_ClearWatermarksRejected(entry, StateBufferStore_WatermarkRejection::DATA_ENTRY);
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
     }

@@ -43,6 +43,13 @@ TEST(OffNominal, NotFresh) {
     tester.notFreshTest();
 }
 
+TEST(Nominal, LastReadTimeOptional) {
+    COMMENT("A read with no previous read time is never reported NOT_FRESH");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-013");
+    Svc::StateBufferStoreTester tester;
+    tester.lastReadTimeOptionalTest();
+}
+
 TEST(Nominal, EntryIsolation) {
     COMMENT("Entries are independent of one another");
     REQUIREMENT("REQ-STATEBUFFERSTORE-010");
@@ -235,6 +242,99 @@ TEST(OffNominal, WatermarkTornRead) {
     REQUIREMENT("REQ-STATEBUFFERSTORE-014");
     Svc::StateBufferStoreTester tester;
     tester.watermarkTornReadTest();
+}
+
+TEST(Nominal, PerEntryDepth) {
+    COMMENT("Each entry keeps its own configured depth, including the bounds");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-010");
+    Svc::StateBufferStoreTester tester;
+    tester.perEntryDepthTest();
+}
+
+TEST(Nominal, WatermarkTypeMismatch) {
+    COMMENT("A value of a different type than the watermarks leaves them unchanged");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-005");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-006");
+    Svc::StateBufferStoreTester tester;
+    tester.watermarkTypeMismatchTest();
+}
+
+TEST(Nominal, TlmStore) {
+    COMMENT("Mapped telemetry is decoded and stored with the sender's time tag");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmStoreTest();
+}
+
+TEST(Nominal, TlmUnmapped) {
+    COMMENT("Unmapped telemetry is ignored");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmUnmappedTest();
+}
+
+TEST(Nominal, TlmAllTypes) {
+    COMMENT("Telemetry of every mapping type decodes to a PolyType of that type");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmAllTypesTest();
+}
+
+TEST(OffNominal, TlmDecodeFailed) {
+    COMMENT("Telemetry that does not decode as its mapping's type is reported, not stored");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmDecodeFailedTest();
+}
+
+TEST(OffNominal, TlmEntryRefusesData) {
+    COMMENT("An entry mapped to telemetry refuses data puts before any telemetry arrives");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmEntryRefusesDataTest();
+}
+
+TEST(Death, Unconfigured) {
+    COMMENT("Using the component before configure() asserts");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-010");
+    Svc::StateBufferStoreTester tester;
+    tester.unconfiguredDeathTest();
+}
+
+TEST(Death, ConfigureTwice) {
+    COMMENT("Configuring twice asserts");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-010");
+    Svc::StateBufferStoreTester tester;
+    tester.configureTwiceDeathTest();
+}
+
+TEST(Death, NHistoryTooDeep) {
+    COMMENT("An N-measurement read deeper than the entry asserts");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-009");
+    Svc::StateBufferStoreTester tester;
+    tester.nHistoryTooDeepDeathTest();
+}
+
+TEST(Death, OversizedPutData) {
+    COMMENT("A data put larger than MAX_DATA_SIZE asserts");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-011");
+    Svc::StateBufferStoreTester tester;
+    tester.oversizedPutDataDeathTest();
+}
+
+TEST(Death, UntypedPut) {
+    COMMENT("A put of an untyped PolyType asserts");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-001");
+    Svc::StateBufferStoreTester tester;
+    tester.untypedPutDeathTest();
+}
+
+TEST(Death, TlmMapping) {
+    COMMENT("A malformed telemetry mapping table asserts at configuration");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmMappingDeathTest();
 }
 
 int main(int argc, char** argv) {
