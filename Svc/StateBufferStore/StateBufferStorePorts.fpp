@@ -2,7 +2,7 @@
 # StateBufferStorePorts:
 #
 # Types and ports used to store measurements in, and retrieve measurements,
-# watermarks, and measurement history from, Svc::StateBufferStore
+# watermarks, and measurement history from the Svc::StateBufferStore
 #####
 
 module Svc {
@@ -61,7 +61,7 @@ module Svc {
     @ INVALID_VALIDITY and stores nothing if validity is not OK or INVALID
     port SbsPut(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to write
-        ref val: Fw.PolyType                    @< value to store
+        val: Fw.PolyType                        @< value to store
         validity: SbsStatus                     @< validity to record with the value: OK or INVALID
     ) -> SbsStatus
 

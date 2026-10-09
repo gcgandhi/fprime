@@ -63,12 +63,12 @@ Space partitioning is out of scope for this component, so they are not ported.
                           +-------------------------+
    putValue          ---->|                         |<---- timeCaller
    getValue          <--->|                         |
-   putData           ---->|                         |----> eventOut
+   putData           ---->|                         |----> logOut
    getData           <--->|                         |
    getMinMax         <--->|  Svc::StateBufferStore  |<---- cmdIn
    getHistory        <--->|                         |----> cmdResponseOut
    getNHistory       <--->|                         |----> cmdRegOut
-   tlmIn             ---->|                         |----> textEventOut
+   tlmIn             ---->|                         |----> logTextOut
                           |                         |
    (privileged)           |                         |
    clearMinMax       <--->|                         |
@@ -103,8 +103,8 @@ type, runs every read's attempt loop. Templates here follow CPP-7
 (`.github/skills/fprime-cpp-design/SKILL.md`): single-parameter helpers only.
 
 The counter admits one writer per entry. A telemetry-mapped entry refuses
-puts, so `tlmIn` is its only writer port; that its channel arrives from one
-thread at a time, and that every other entry has a single writer, are
+puts, so `tlmIn` is its only writer port; that its channel is sent to `tlmIn`
+by one thread at a time, and that every other entry has a single writer, are
 assumptions (§6).
 
 A history read is a single coherent read of the whole dump, not one per
@@ -290,7 +290,7 @@ table, bounded by its size.
 since either would interleave unrelated values in one history, and fixes every
 mapped entry as a value entry written only by `tlmIn`, so any put to it is
 refused even before its channel first arrives. Each mapped channel must still
-reach `tlmIn` from one thread at a time (§6). The table must outlive the
+be sent to `tlmIn` by one thread at a time (§6). The table must outlive the
 component.
 
 ### 3.9 Ports
@@ -310,9 +310,12 @@ component.
 | `cmdIn` | command recv | `Fw.Cmd` | Receives commands |
 | `cmdRegOut` | command reg | `Fw.CmdReg` | Registers commands |
 | `cmdResponseOut` | command resp | `Fw.CmdResponse` | Sends command responses |
-| `eventOut` | event | `Fw.Log` | Emits events |
-| `textEventOut` | text event | `Fw.LogText` | Emits text events |
+| `logOut` | event | `Fw.Log` | Emits events |
+| `logTextOut` | text event | `Fw.LogText` | Emits text events |
 | `timeCaller` | time get | `Fw.Time` | Gets the time stamped on `putValue` and `putData` measurements |
+
+The command and event ports come from the framework interfaces `Fw.Command`
+and `Fw.Event`, imported in the FPP.
 
 ### 3.10 Commands
 
@@ -411,14 +414,34 @@ Fw::PolyType value(static_cast<U32>(42));
 const Svc::SbsStatus stored =
     this->storeValue_out(0, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, value, Svc::SbsStatus::OK);
 
+A consumer that tracks freshness keeps the time of the last measurement it
+processed, starting from `Fw::ZERO_TIME` (no previous read):
+
+```c++
+// member of the consumer, initialized to Fw::ZERO_TIME
+Fw::Time m_lastRead;
+
 Fw::PolyType readBack;
 Fw::Time measTime;
 const Svc::SbsStatus status =
     this->loadValue_out(0, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, readBack, measTime, this->m_lastRead);
+if (status == Svc::SbsStatus::NOT_FRESH) {
+    return;  // already processed this measurement
+}
+if (status == Svc::SbsStatus::OK) {
+    this->m_lastRead = measTime;  // later reads report NOT_FRESH until a new store
+    // ... use readBack
+}
 ```
 
 Retaining the previous `measTime` as `lastReadTime` on the next call is what
 produces `NOT_FRESH`, letting a consumer skip values it has already processed.
+`NOT_FRESH` takes the place of the stored validity: the value and `measTime`
+are still returned, but a re-read of an unchanged `INVALID` measurement reports
+`NOT_FRESH`, not `INVALID`, so a consumer that needs the validity should act
+on it the first time it reads the measurement. Only the latest-value reads,
+`getValue` and `getData`, check freshness; watermark and history reads never
+report `NOT_FRESH`.
 `lastReadTime` is optional, as in the heritage interface, which accepted `NULL`:
 passing `Fw::ZERO_TIME` skips the freshness check, so a consumer that does not
 track freshness never sees `NOT_FRESH`. A measurement stamped with
@@ -437,8 +460,8 @@ unconnected stamps every measurement with zero time.
   by the subsystem producing it. Overlapping writes to one entry can leave the
   counter even mid-write and let a reader accept a torn copy, so they are not
   supported. Telemetry-mapped entries refuse puts, so `tlmIn` is their only
-  writer port, but `tlmIn` is unguarded: each mapped channel must reach it from
-  one thread at a time, which holds when the producing component emits the
+  writer port, but `tlmIn` is unguarded: each mapped channel must be sent to it
+  by one thread at a time, which holds when the producing component emits the
   channel from a single thread. For every other entry, concurrent `putValue` or
   `putData` callers on one entry are likewise not supported. Concurrent readers
   are safe.
@@ -469,10 +492,13 @@ unconnected stamps every measurement with zero time.
 
 ## 7. Deferred work
 
-- An autocoder generating entry identifiers, the telemetry mapping table of
-  §3.8, and history offsets, as proposed in #5067. Configuration and the
-  mapping table are written by hand for now, as `Svc::PolyDb`'s configuration
-  is.
+- An autocoder generating `config/StateBufferStoreCfg.fpp` (the `StateEntry`
+  enumeration and the per-entry `HistoryDepths`) and the telemetry mapping
+  table of §3.8 from a deployment input file, as proposed in #5067. Likely
+  sources are the deployment's telemetry dictionary, for channel IDs and
+  types, and a project entry list (for example XML or JSON) naming each entry,
+  its depth, and any channel it stores. Both are written by hand for now, as
+  `Svc::PolyDb`'s configuration is.
 - Clearing the watermarks of all entries at once. #5067 has watermarks
   "cleared in response to a command or input port, either for individual
   entries or for all entries in the database"; `clearMinMax`,
@@ -556,6 +582,8 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-09 | Review fixes: `FailedReadCoherentData` is warning high; guarded clearers; telemetry-mapped entries refuse puts; torn reads copy nothing out and a torn clear-and-get keeps its watermarks; bool watermarks; `WRONG_KIND` checked first on history reads; ports, commands, and events sections |
 | 2026-10-09 | `getNHistory` returns the entry's full depth for a request deeper than it, rather than asserting |
 | 2026-10-09 | `getNHistory` reports `INVALID_BUFFER_SIZE` when its buffer cannot hold one measurement |
+| 2026-10-09 | Usage shows the full freshness-tracking pattern; `NOT_FRESH` replacing validity and the reads that check freshness documented |
+| 2026-10-09 | Framework command and event ports imported from `Fw.Command` and `Fw.Event`; event ports renamed `logOut` and `logTextOut` |
 | 2026-10-09 | A floating-point NaN never becomes a watermark |
 | 2026-10-09 | Single-writer claims for telemetry-mapped entries narrowed to one thread per channel |
 | 2026-10-09 | Reads judge an empty `Fw::Buffer` by its size and `putData` refuses a null one, rather than asserting |

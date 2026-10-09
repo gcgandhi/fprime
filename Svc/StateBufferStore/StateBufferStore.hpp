@@ -142,7 +142,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Handler implementation for putValue
     Svc::SbsStatus putValue_handler(FwIndexType portNum,                                //!< The port number
                                     const Svc::StateBufferStoreCfg::StateEntry& entry,  //!< The entry to write
-                                    Fw::PolyType& val,                                  //!< Value to store
+                                    const Fw::PolyType& val,                            //!< Value to store
                                     const Svc::SbsStatus& validity                      //!< Validity to record
                                     ) override;
 

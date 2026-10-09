@@ -140,8 +140,7 @@ void StateBufferStoreTester::put(StateBufferStoreCfg::StateEntry::T entry,
                                  U32 seconds,
                                  SbsStatus validity) {
     this->setTestTime(Fw::Time(TimeBase::TB_WORKSTATION_TIME, seconds, 0));
-    Fw::PolyType val = value;
-    EXPECT_EQ(this->invoke_to_putValue(0, entry, val, validity), SbsStatus::OK);
+    EXPECT_EQ(this->invoke_to_putValue(0, entry, value, validity), SbsStatus::OK);
 }
 
 Fw::PolyType StateBufferStoreTester::get(StateBufferStoreCfg::StateEntry::T entry,
@@ -1034,11 +1033,11 @@ void StateBufferStoreTester::dataEntryKindCheckedFirstTest() {
 void StateBufferStoreTester::perEntryDepthTest() {
     const StateBufferStoreCfg::HistoryDepths depths;
     // The sample configuration sets these entries to the depth bounds; the
-    // test is only meaningful while their depths differ from ENTRY_A's
+    // test is only meaningful while the bounds differ. ENTRY_A keeps the
+    // default depth, which may equal either bound.
     ASSERT_EQ(depths[ENTRY_MIN_DEPTH], static_cast<FwSizeType>(StateBufferStoreCfg::MIN_HISTORY_DEPTH));
     ASSERT_EQ(depths[ENTRY_MAX_DEPTH], static_cast<FwSizeType>(StateBufferStoreCfg::MAX_HISTORY_DEPTH));
-    ASSERT_NE(depths[ENTRY_A], depths[ENTRY_MIN_DEPTH]);
-    ASSERT_NE(depths[ENTRY_A], depths[ENTRY_MAX_DEPTH]);
+    ASSERT_NE(depths[ENTRY_MIN_DEPTH], depths[ENTRY_MAX_DEPTH]);
 
     const StateBufferStoreCfg::StateEntry::T entries[] = {ENTRY_MIN_DEPTH, ENTRY_A, ENTRY_MAX_DEPTH};
     for (const StateBufferStoreCfg::StateEntry::T entry : entries) {

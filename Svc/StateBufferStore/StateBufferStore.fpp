@@ -28,8 +28,8 @@ module Svc {
         # and writer are coordinated by a per-entry coherency counter rather
         # than a mutex, preserving the heritage design. The counter allows one
         # writer per entry; a telemetry-mapped entry refuses puts, so tlmIn is
-        # its only writer port, and each mapped channel must reach tlmIn from
-        # one thread at a time.
+        # its only writer port, and each mapped channel must be sent to tlmIn
+        # by one thread at a time.
         # ----------------------------------------------------------------------
 
         @ Port storing a primitive measurement
@@ -53,7 +53,7 @@ module Svc {
         @ Port getting an entry's most recent N measurements
         sync input port getNHistory: SbsGetNHistory
 
-        @ Port receiving telemetry. Channels in the mapping table given to
+        @ Port for receiving telemetry. Channels in the mapping table given to
         @ configure() are decoded and stored in their mapped entry, stamped
         @ with the sender's time tag; all other channels are ignored
         sync input port tlmIn: Fw.Tlm
@@ -69,7 +69,7 @@ module Svc {
         # Guarded, as is CLEAR_WATERMARKS, so that clears are serialized on the
         # component mutex: a second clear landing inside clearAndGetMinMax would
         # overwrite the retired watermarks it is about to report. Puts and
-        # plain reads take no lock.
+        # plain reads are not guarded.
         # ----------------------------------------------------------------------
 
         @ Port clearing an entry's minimum and maximum measurements
@@ -82,20 +82,9 @@ module Svc {
         # Framework ports
         # ----------------------------------------------------------------------
 
-        @ Port for receiving commands
-        command recv port cmdIn
+        import Fw.Command
 
-        @ Port for sending command registration requests
-        command reg port cmdRegOut
-
-        @ Port for sending command responses
-        command resp port cmdResponseOut
-
-        @ Event port
-        event port eventOut
-
-        @ Text event port
-        text event port textEventOut
+        import Fw.Event
 
         @ Time get port
         time get port timeCaller

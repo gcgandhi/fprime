@@ -1,5 +1,8 @@
 # ======================================================================
 # FPP file for StateBufferStore configuration
+#
+# Written by hand for now; intended to be generated from a deployment input
+# file (see Svc/StateBufferStore/docs/sdd.md §7).
 # ======================================================================
 
 module Svc {
@@ -50,7 +53,7 @@ module Svc {
     constant MIN_HISTORY_DEPTH = 2
 
     @ Typical history depth for an entry
-    constant DEFAULT_HISTORY_DEPTH = 4
+    constant DEFAULT_HISTORY_DEPTH = 2
 
     @ Per-entry history depth, one element per StateEntry. Each element must
     @ be in [MIN_HISTORY_DEPTH, MAX_HISTORY_DEPTH]; StateBufferStore asserts

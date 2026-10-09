@@ -628,7 +628,7 @@ SbsStatus StateBufferStore::readHistory(Entry& block,
 
 SbsStatus StateBufferStore::putValue_handler(FwIndexType portNum,
                                              const StateBufferStoreCfg::StateEntry& entry,
-                                             Fw::PolyType& val,
+                                             const Fw::PolyType& val,
                                              const SbsStatus& validity) {
     Entry& block = this->checkedEntry(entry);
     // Timestamp first: the value's time should reflect when it was produced,
