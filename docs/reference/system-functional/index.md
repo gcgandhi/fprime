@@ -30,7 +30,7 @@ The system functional documentation provides a functional or capability descript
 - __[Buffer Management](buffer-management.md)__ - Memory allocation and buffer lifecycle services
 - __[Parameter Management](parameters.md)__ - Persistent configuration value storage and retrieval
 - __[Time Services](time-services.md)__ - System time sources and cycle generation
-- __[System Services](system-services.md)__ - Resource monitoring, version reporting, assertion handling, and polymorphic database
+- __[System Services](system-services.md)__ - Resource monitoring, version reporting, assertion handling, polymorphic database, and state buffer store
 - __[Hardware Drivers](hardware-drivers.md)__ - Byte stream, network, serial, GPIO, I2C, and SPI driver abstractions
 
 ### Subtopologies

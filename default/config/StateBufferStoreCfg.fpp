@@ -73,8 +73,9 @@ module Svc {
     @ measurement. Sizes the payload region of every entry's history.
     constant MAX_DATA_SIZE = 256
 
-    @ Number of times a reader retries a torn read before giving up,
-    @ emitting a FATAL event, and reporting SbsStatus.INCOHERENT.
+    @ Number of attempts, including the first, a reader makes at a coherent
+    @ read before giving up, emitting a warning event, and reporting
+    @ SbsStatus.INCOHERENT.
     constant MAX_READ_ITERATIONS = 2
 
   }

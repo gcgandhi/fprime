@@ -13,7 +13,7 @@
 
 ## Overview
 
-System services provide utility functions that support overall system operation: resource monitoring, version reporting, assertion handling, and a general-purpose value database. These components are typically present in every F Prime deployment but do not interact with each other as a subsystem — each provides an independent supporting function.
+System services provide utility functions that support overall system operation: resource monitoring, version reporting, assertion handling, and general-purpose value databases. These components are typically present in every F Prime deployment but do not interact with each other as a subsystem — each provides an independent supporting function.
 
 ### System Resource Monitoring
 
@@ -49,11 +49,12 @@ The Polymorphic Database (PolyDb) provides a general-purpose in-memory store for
 
 ### State Buffer Store
 
-The State Buffer Store extends the polymorphic database idea with history and extremes. Alongside each entry's latest value it records the minimum and maximum ever stored — each with its own timestamp — and keeps a circular history of recent measurements whose depth is configured per entry. Readers can retrieve the latest value, the watermarks, the full history, or just the most recent N measurements, and each read reports whether the value has never been written or has not changed since that reader last looked.
+The State Buffer Store extends the polymorphic database idea with history and extremes. Alongside each entry's latest value it records the minimum and maximum stored since the watermarks were last cleared — each with its own timestamp — and keeps a circular history of recent measurements whose depth is configured per entry. Readers can retrieve the latest value, the watermarks, the full history, or just the most recent N measurements, and each read reports whether the entry has never been written. The latest-value reads also report when the value has not changed since the reader last looked, if the reader supplies its previous read time.
 
-Use PolyDb when only the latest value matters; use the State Buffer Store when a consumer needs trend data, extremes for telemetry, or a short history to downlink after an anomaly. Readers and writers are coordinated without mutexes by a per-entry coherency counter, so a reader can detect and retry a measurement that was rewritten mid-read.
+Use PolyDb when only the latest value matters; use the State Buffer Store when a consumer needs trend data, extremes for telemetry, or a short history to downlink after an anomaly. Puts and reads are coordinated without mutexes by a per-entry coherency counter, so a reader can detect and retry a measurement that was rewritten mid-read; only watermark clears take the component's mutex.
 
 ### Off Nominal
 
 - If the platform does not support resource queries (CPU, memory), the System Resources component reports unavailable metrics.
 - Fatal handler behavior is platform-specific; the default implementation is a last-resort action and may not preserve diagnostic information.
+- If a State Buffer Store reader finds no coherent copy within `MAX_READ_ITERATIONS` attempts, the read reports `INCOHERENT` and copies nothing out, and the component emits the throttled warning-high `FailedReadCoherentData` event; the `RESET_THROTTLES` command re-enables it.

@@ -26,7 +26,9 @@ module Svc {
         #
         # Synchronous and unguarded: handlers run on the caller's thread. Reader
         # and writer are coordinated by a per-entry coherency counter rather
-        # than a mutex, preserving the heritage design.
+        # than a mutex, preserving the heritage design. The counter allows one
+        # writer per entry; a telemetry-mapped entry refuses puts, so tlmIn is
+        # its only writer.
         # ----------------------------------------------------------------------
 
         @ Port storing a primitive measurement
@@ -62,13 +64,18 @@ module Svc {
         # available only to the component responsible for telemetry. F Prime has no
         # in-component equivalent, so access is controlled by topology wiring.
         # See the access-control note in docs/sdd.md.
+        #
+        # Guarded, as is CLEAR_WATERMARKS, so that clears are serialized on the
+        # component mutex: a second clear landing inside clearAndGetMinMax would
+        # overwrite the retired watermarks it is about to report. Puts and
+        # plain reads take no lock.
         # ----------------------------------------------------------------------
 
         @ Port clearing an entry's minimum and maximum measurements
-        sync input port clearMinMax: SbsClearMinMax
+        guarded input port clearMinMax: SbsClearMinMax
 
         @ Port getting an entry's minimum and maximum measurements, then clearing them
-        sync input port clearAndGetMinMax: SbsClearAndGetMinMax
+        guarded input port clearAndGetMinMax: SbsClearAndGetMinMax
 
         # ----------------------------------------------------------------------
         # Framework ports
@@ -102,24 +109,29 @@ module Svc {
         ) opcode 0x00
 
         @ Clear an entry's minimum and maximum measurements
-        sync command CLEAR_WATERMARKS(
+        guarded command CLEAR_WATERMARKS(
             $entry: StateBufferStoreCfg.StateEntry  @< the entry to clear
         ) opcode 0x01
+
+        @ Reset the throttles of FailedReadCoherentData and TlmDecodeFailed, so
+        @ those warnings resume after the operator has acted on them
+        sync command RESET_THROTTLES opcode 0x02
 
         # ----------------------------------------------------------------------
         # Events
         # ----------------------------------------------------------------------
 
-        @ A coherent read could not be obtained within the configured retry
-        @ limit, so the reported measurement may be torn
+        @ A coherent read could not be obtained within the configured number
+        @ of attempts, so the read reported INCOHERENT and copied nothing out
         event FailedReadCoherentData(
             $entry: StateBufferStoreCfg.StateEntry  @< the entry being read
             operation: ReadOperation                @< the read that failed
             iterations: U32                         @< attempts made
         ) \
-        severity fatal \
+        severity warning high \
         id 0x00 \
-        format "Failed to read coherent data for entry {} in {} after {} iterations"
+        format "Failed to read coherent data for entry {} in {} after {} iterations" \
+        throttle 10
 
         @ Report of an entry's minimum and maximum measurements.
         @
@@ -179,6 +191,12 @@ module Svc {
         severity warning low \
         id 0x05 \
         format "CLEAR_WATERMARKS for entry {} rejected: {}"
+
+        @ The throttles of FailedReadCoherentData and TlmDecodeFailed were reset
+        event ThrottlesReset \
+        severity activity high \
+        id 0x06 \
+        format "Event throttles reset"
 
     }
 

@@ -49,6 +49,9 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A put carrying a validity reports that validity on read
     void putWithValidityTest();
 
+    //! A put whose validity is a store-generated status is refused and stores nothing
+    void putRefusesStoreStatusTest();
+
     //! An entry never written reports NOT_WRITTEN
     void notWrittenTest();
 
@@ -91,6 +94,12 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! An N-measurement read truncates to whole measurements
     void nHistoryTruncateTest();
 
+    //! An N-measurement read into a buffer too small for one measurement reports INVALID_BUFFER_SIZE
+    void nHistoryNoRoomTest();
+
+    //! An N-measurement read deeper than the entry returns its full depth
+    void nHistoryTooDeepTest();
+
     //! A string or struct value round trips through the data interface
     void dataRoundTripTest();
 
@@ -100,7 +109,7 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A torn read that resolves on retry reports the measurement normally
     void tornReadRecoversTest();
 
-    //! A read torn on every attempt reports INCOHERENT and a FATAL event
+    //! A read torn on every attempt reports INCOHERENT and a warning event
     void tornReadExhaustedTest();
 
     //! REPORT_WATERMARKS emits the watermark report event
@@ -117,6 +126,9 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
 
     //! A data entry reports NOT_WRITTEN and NOT_FRESH like a primitive entry
     void dataStatusTest();
+
+    //! A data put larger than MAX_DATA_SIZE reports INVALID_BUFFER_SIZE and stores nothing
+    void oversizedPutDataTest();
 
     //! A history read torn on every attempt reports INCOHERENT and copies nothing
     void historyTornReadTest();
@@ -137,8 +149,14 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! the clear before they are read
     void clearAndGetRacingPutTest();
 
-    //! Watermark reads torn on every attempt report INCOHERENT and a FATAL event
+    //! Watermark reads torn on every attempt report INCOHERENT and a warning event
     void watermarkTornReadTest();
+
+    //! Bool watermarks order false before true
+    void boolWatermarkTest();
+
+    //! History reads of a data entry report WRONG_KIND before judging the request
+    void dataEntryKindCheckedFirstTest();
 
     //! Each entry keeps its own configured depth, including the bounds
     void perEntryDepthTest();
@@ -158,20 +176,20 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! Telemetry that does not decode as its mapping's type is reported, not stored
     void tlmDecodeFailedTest();
 
+    //! Throttled warnings stop at their throttle and resume after RESET_THROTTLES
+    void throttleResetTest();
+
     //! An entry mapped to telemetry refuses data puts before any telemetry arrives
     void tlmEntryRefusesDataTest();
+
+    //! A telemetry-mapped entry refuses value puts and data reads
+    void tlmEntryRefusesValueTest();
 
     //! Using the component before configure() asserts
     void unconfiguredDeathTest();
 
     //! Configuring twice asserts
     void configureTwiceDeathTest();
-
-    //! An N-measurement read deeper than the entry asserts
-    void nHistoryTooDeepDeathTest();
-
-    //! A data put larger than MAX_DATA_SIZE asserts
-    void oversizedPutDataDeathTest();
 
     //! A put of an untyped PolyType asserts
     void untypedPutDeathTest();

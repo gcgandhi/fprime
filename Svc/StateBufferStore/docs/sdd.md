@@ -4,8 +4,8 @@
 
 `Svc::StateBufferStore` stores measurements produced across the flight software
 and provides read access to them: the latest value, the minimum and maximum
-values ever recorded ("watermarks"), and a per-entry circular history of recent
-measurements. It decouples measurement producers from consumers — a producer
+values recorded since they were last cleared ("watermarks"), and a per-entry
+circular history of recent measurements. It decouples measurement producers from consumers — a producer
 stores a value without knowing who reads it, and a consumer reads without
 knowing who produced it.
 
@@ -21,7 +21,8 @@ Entries are declared in project configuration
 depth is set independently. Values are carried as `Fw::PolyType`, so a single
 set of ports serves all supported primitive types; strings, structures, and
 byte arrays use a parallel `Fw::Buffer` interface. Each entry is used through
-exactly one of the two interfaces, fixed by its first store.
+exactly one of the two interfaces, fixed by its first store or, for an entry
+mapped to a telemetry channel, by `configure()`.
 
 ## 2. Requirements
 
@@ -30,22 +31,22 @@ derives from in the heritage module's specification.
 
 | Requirement | Heritage | Description | Verification |
 |---|---|---|---|
-| REQ-STATEBUFFERSTORE-001 | HER-0004 | `Svc::StateBufferStore` shall provide a synchronous interface to store a primitive value for a single entry, recording a caller-supplied validity with it. | Unit Test |
-| REQ-STATEBUFFERSTORE-002 | HER-0005, .0006 | `Svc::StateBufferStore` shall provide a synchronous interface to store a structure or fixed-length string for a single entry, recording a caller-supplied validity with it. | Unit Test |
+| REQ-STATEBUFFERSTORE-001 | HER-0004 | `Svc::StateBufferStore` shall provide a synchronous interface to store a primitive value for a single entry, recording a caller-supplied validity of `OK` or `INVALID` with it and refusing any other validity with `WRONG_KIND`, storing nothing. | Unit Test |
+| REQ-STATEBUFFERSTORE-002 | HER-0005, .0006 | `Svc::StateBufferStore` shall provide a synchronous interface to store a structure or fixed-length string for a single entry, recording a caller-supplied validity of `OK` or `INVALID` with it and refusing any other validity with `WRONG_KIND`, storing nothing. | Unit Test |
 | REQ-STATEBUFFERSTORE-003 | HER-0007 | `Svc::StateBufferStore` shall provide a synchronous interface to get the latest primitive measurement for an entry, reporting its value, time, and validity. | Unit Test |
 | REQ-STATEBUFFERSTORE-004 | HER-0008, .0009 | `Svc::StateBufferStore` shall provide a synchronous interface to get the latest structure or string measurement for an entry, and shall report `INVALID_BUFFER_SIZE` without copying when the supplied buffer is too small. | Unit Test |
 | REQ-STATEBUFFERSTORE-005 | HER-0011 | `Svc::StateBufferStore` shall record the minimum and maximum value stored for each entry, each with the time and validity in force when it was recorded, and shall provide interfaces to report them over a port and as an event. | Unit Test |
 | REQ-STATEBUFFERSTORE-006 | HER-0014 | `Svc::StateBufferStore` shall provide an interface to clear an entry's watermarks, after which the next stored value becomes both watermarks. | Unit Test |
 | REQ-STATEBUFFERSTORE-007 | HER-0013 | `Svc::StateBufferStore` shall provide an interface that reports an entry's watermarks and then clears them in one operation. | Unit Test |
 | REQ-STATEBUFFERSTORE-008 | HER-0010 | `Svc::StateBufferStore` shall provide a synchronous interface to get a value entry's stored measurement history in chronological order as serialized `SbsMeasurement` records, and shall report `INVALID_BUFFER_SIZE` without copying when the supplied buffer cannot hold the entry's full depth. | Unit Test |
-| REQ-STATEBUFFERSTORE-009 | HER-0100 | `Svc::StateBufferStore` shall provide a synchronous interface to get a value entry's most recent N stored measurements in chronological order, where N of zero requests the entry's full depth, and shall copy as many whole measurements as the supplied buffer holds when it cannot hold N. | Unit Test |
+| REQ-STATEBUFFERSTORE-009 | HER-0100 | `Svc::StateBufferStore` shall provide a synchronous interface to get a value entry's most recent N stored measurements in chronological order, where N of zero or N exceeding the entry's depth requests the entry's full depth, and shall copy as many whole measurements as the supplied buffer holds when it cannot hold N, reporting `INVALID_BUFFER_SIZE` without copying when it cannot hold one. | Unit Test |
 | REQ-STATEBUFFERSTORE-010 | HER-0017, .0018 | `Svc::StateBufferStore` shall store, for each entry independently, a configuration-specified history depth of at least two measurements, in memory obtained once from an `Fw::MemAllocator`, and shall overwrite the oldest measurement when the history is full. | Unit Test |
-| REQ-STATEBUFFERSTORE-011 | HER-0020, .0021, .0022 | `Svc::StateBufferStore` shall store measurements of the primitive types `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `F32`, and `F64`, and shall store structures and fixed-length strings up to a configured maximum size. `U64`, `I64`, and `bool` are also accepted, as `Fw::PolyType` carries them. | Unit Test |
-| REQ-STATEBUFFERSTORE-012 | HER-0023 | `Svc::StateBufferStore` shall time tag every stored measurement with the time obtained from its time port at the moment of storage. | Unit Test |
+| REQ-STATEBUFFERSTORE-011 | HER-0020, .0021, .0022 | `Svc::StateBufferStore` shall store measurements of the primitive types `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `F32`, and `F64`, and shall store structures and fixed-length strings up to a configured maximum size, reporting `INVALID_BUFFER_SIZE` and storing nothing for a larger one. `U64`, `I64`, and `bool` are also accepted, as `Fw::PolyType` carries them. | Unit Test |
+| REQ-STATEBUFFERSTORE-012 | HER-0023 | `Svc::StateBufferStore` shall time tag every measurement stored through `putValue` or `putData` with the time obtained from its time port at the moment of storage. | Unit Test |
 | REQ-STATEBUFFERSTORE-013 | derived | `Svc::StateBufferStore` shall report `NOT_WRITTEN` for an entry never stored to, and `NOT_FRESH` when the measurement has not changed since the caller's previous read; a caller supplying no previous read time (`Fw::ZERO_TIME`) shall not be checked for freshness. | Unit Test |
-| REQ-STATEBUFFERSTORE-014 | derived (#5067) | `Svc::StateBufferStore` shall detect a measurement, watermark, or history read concurrently with a write, retry the read up to a configured number of attempts, and on exhaustion emit a FATAL event identifying the read and report `INCOHERENT` without copying out the read data. | Unit Test |
+| REQ-STATEBUFFERSTORE-014 | derived (#5067) | `Svc::StateBufferStore` shall detect a measurement, watermark, or history read concurrently with a write, retry the read up to a configured number of attempts, and on exhaustion emit a warning-high event identifying the read and report `INCOHERENT` without copying out the read data. | Unit Test |
 | REQ-STATEBUFFERSTORE-015 | derived | `Svc::StateBufferStore` shall perform every store and read operation without dynamic memory allocation after configuration and in bounded time. | Inspection |
-| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it. | Unit Test |
+| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, or as a value entry written only through `tlmIn` when `configure()` maps a telemetry channel to it, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it and for any put to a telemetry-mapped entry. | Unit Test |
 | REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, storing nothing, when a mapped value does not decode as its type. | Unit Test |
 
 Heritage requirements HER-0001, .0002, and .0003 govern shared-memory
@@ -64,8 +65,8 @@ Space partitioning is out of scope for this component, so they are not ported.
    getData           <--->|                         |
    getMinMax         <--->|  Svc::StateBufferStore  |<---- cmdIn
    getHistory        <--->|                         |----> cmdResponseOut
-   getNHistory       <--->|                         |
-   tlmIn             ---->|                         |
+   getNHistory       <--->|                         |----> cmdRegOut
+   tlmIn             ---->|                         |----> textEventOut
                           |                         |
    (privileged)           |                         |
    clearMinMax       <--->|                         |
@@ -75,9 +76,12 @@ Space partitioning is out of scope for this component, so they are not ported.
 
 ### 3.2 Port kinds and concurrency
 
-The component is `passive` and every input port is `sync`, so each handler runs
-on its caller's thread with no mutex and no queue. This matches the heritage
-module, which was a synchronous library with no thread of its own.
+The component is `passive`, so each handler runs on its caller's thread with no
+queue. This matches the heritage module, which was a synchronous library with no
+thread of its own. The store and read ports are `sync` and take no lock. Only
+the clearers — `clearMinMax`, `clearAndGetMinMax`, and the `CLEAR_WATERMARKS`
+command — are `guarded`, serializing clears against one another on the
+component mutex (§3.3) without ever blocking a put or a read.
 
 Readers and writers are coordinated by a per-entry **coherency counter** rather
 than by guarded ports, following #5067's preference. The counter works as a
@@ -88,9 +92,15 @@ samples it before and after its copy, and accepts the copy only if the first
 sample was even and the two are equal; otherwise a write overlapped the copy and
 the bytes may mix two measurements. The reader re-reads the latest index on
 every attempt, so a retry follows the newest measurement. After
-`MAX_READ_ITERATIONS` failed attempts the component emits the FATAL
-`FailedReadCoherentData` event, naming the read operation, and reports
-`INCOHERENT` without copying anything out.
+`MAX_READ_ITERATIONS` attempts, none of them coherent, the component emits the
+warning-high `FailedReadCoherentData` event (throttled, §3.11), naming the read operation, and
+reports `INCOHERENT` without copying anything out. Every read copies into a
+scratch copy on the reader's stack and hands it to the caller only once the read
+proves coherent.
+
+The counter admits one writer per entry. A telemetry-mapped entry refuses
+puts, so `tlmIn` is its only writer; for every other entry a single writer is an
+assumption (§6).
 
 A history read is a single coherent read of the whole dump, not one per
 measurement, so a dump never mixes measurements from before and after a write.
@@ -121,6 +131,9 @@ can ever be seeded. `Fw::PolyType::operator<` and `operator>` both return
 watermark never succeeds. The flag therefore starts set, and a cleared
 watermark reads back as a zeroed measurement with `NOT_WRITTEN` validity.
 
+`Fw::PolyType` orders no pair of bools either — its `operator<` is false for
+every pair — so the component orders bool values itself, `false` before `true`.
+
 Watermarks are written inside the writer's coherency window, so watermark reads
 are protected exactly as measurement reads are.
 
@@ -129,7 +142,14 @@ flag first, then reads. If a put consumes the flag in between, that put has
 already reseeded the watermarks, so a put that consumes the flag first moves the
 watermarks it displaces to a retired pair, and the read reports those. Without
 this, a put landing between the read and the clear would have its value neither
-reported nor kept.
+reported nor kept. Clears are serialized on the component mutex, because a second
+clear landing inside a `clearAndGetMinMax` could overwrite the retired pair it is
+about to report.
+
+If its read never proves coherent, `clearAndGetMinMax` reports `INCOHERENT` and
+withdraws its clear, provided no put has consumed it, so the watermarks it
+failed to report are kept for the next read. If a put has already consumed the
+clear, that put retired the epoch, and the epoch's watermarks are lost.
 
 A consequence worth noting: storing a value of a *different* type than an
 entry's existing watermarks will not update them, because the comparison cannot
@@ -182,19 +202,22 @@ requirements and ground tooling keep their meaning, and adds `INCOHERENT` and
 
 Three heritage behaviors were deliberately changed:
 
-- **`INCOHERENT` is new.** The heritage `get` emitted the FATAL event on retry
-  exhaustion and then returned the possibly-torn data with its stored validity,
-  so a caller that ignored events could consume bad data silently. This
-  component reports `INCOHERENT` and copies nothing out, so the caller can act
-  on it. Note that in a deployment whose event manager forwards FATAL events to
-  `Svc::FatalHandler`, the event itself ends the software; `INCOHERENT` matters
-  in deployments that do not.
+- **`INCOHERENT` is new, and the event is a warning.** The heritage `get`
+  emitted a FATAL event on retry exhaustion and then returned the possibly-torn
+  data with its stored validity, so a caller that ignored events could consume
+  bad data silently. This component reports `INCOHERENT` and copies nothing out,
+  so the caller can act on it. The event is warning high rather than FATAL: a
+  deployment whose event manager forwards FATAL events to `Svc::FatalHandler`
+  would end the software on the event, leaving `INCOHERENT` unreachable.
 - **Entry kinds are refused, not asserted.** The heritage `put` asserted that a
   value matched its entry's configured type. Here an entry is fixed as a value
-  or data entry by its first store, and every operation of the other kind —
+  or data entry by its first store, or as a value entry by `configure()` when
+  a telemetry channel is mapped to it, and every operation of the other kind —
   including the puts, which therefore return `SbsStatus` — reports `WRONG_KIND`
   and changes nothing. Watermarks and history are value-entry operations; a data
-  entry's history is kept for coherency but is not readable.
+  entry's history is kept for coherency but is not readable. A
+  telemetry-mapped entry also refuses `putValue`, keeping `tlmIn` its only
+  writer.
 - **`UNINITIALIZED` is unreachable.** The heritage module checked a global
   initialization flag on every call. Here, calling any port before
   `configure()` is a programming error and trips an assertion, which is the
@@ -250,13 +273,60 @@ A channel not in the table is ignored without comment: a component's telemetry
 port carries all of its channels, and the store holds only those mapped. A
 mapped value that fails to decode — too short, or with bytes left over — means
 the table disagrees with the channel's definition; it is not stored, and the
-throttled `TlmDecodeFailed` warning reports it. Lookup is a linear scan of the
+throttled `TlmDecodeFailed` warning reports it; `RESET_THROTTLES` (§3.10)
+re-enables it once throttled. Lookup is a linear scan of the
 table, bounded by its size.
 
 `configure()` asserts that no channel and no entry appears twice in the table,
 since either would interleave unrelated values in one history, and fixes every
-mapped entry as a value entry, so a data put to it is refused even before its
-channel first arrives. The table must outlive the component.
+mapped entry as a value entry written only by `tlmIn`, so any put to it is
+refused even before its channel first arrives. The table must outlive the
+component.
+
+### 3.9 Ports
+
+| Port | Kind | Data Type | Description |
+|---|---|---|---|
+| `putValue` | sync input | `Svc.SbsPut` | Stores a primitive measurement |
+| `getValue` | sync input | `Svc.SbsGet` | Gets the latest primitive measurement |
+| `putData` | sync input | `Svc.SbsPutData` | Stores a string, structure, or byte-array measurement |
+| `getData` | sync input | `Svc.SbsGetData` | Gets the latest string, structure, or byte-array measurement |
+| `getMinMax` | sync input | `Svc.SbsGetMinMax` | Gets an entry's watermarks |
+| `getHistory` | sync input | `Svc.SbsGetHistory` | Gets an entry's full history |
+| `getNHistory` | sync input | `Svc.SbsGetNHistory` | Gets an entry's most recent N measurements |
+| `tlmIn` | sync input | `Fw.Tlm` | Receives telemetry, storing mapped channels (§3.8) |
+| `clearMinMax` | guarded input | `Svc.SbsClearMinMax` | Clears an entry's watermarks (privileged, §3.5) |
+| `clearAndGetMinMax` | guarded input | `Svc.SbsClearAndGetMinMax` | Gets an entry's watermarks, then clears them (privileged, §3.5) |
+| `cmdIn` | command recv | `Fw.Cmd` | Receives commands |
+| `cmdRegOut` | command reg | `Fw.CmdReg` | Registers commands |
+| `cmdResponseOut` | command resp | `Fw.CmdResponse` | Sends command responses |
+| `eventOut` | event | `Fw.Log` | Emits events |
+| `textEventOut` | text event | `Fw.LogText` | Emits text events |
+| `timeCaller` | time get | `Fw.Time` | Gets the time stamped on `putValue` and `putData` measurements |
+
+### 3.10 Commands
+
+| Command | Opcode | Kind | Argument | Description | Failure |
+|---|---|---|---|---|---|
+| `REPORT_WATERMARKS` | 0x00 | sync | `entry: StateBufferStoreCfg.StateEntry` | Reports an entry's watermarks with `WatermarkReport` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry or a torn read |
+| `CLEAR_WATERMARKS` | 0x01 | guarded | `entry: StateBufferStoreCfg.StateEntry` | Clears an entry's watermarks and reports it with `WatermarksCleared` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry |
+| `RESET_THROTTLES` | 0x02 | sync | none | Resets the throttles of `FailedReadCoherentData` and `TlmDecodeFailed` and reports it with `ThrottlesReset` | none |
+
+Both throttled warnings stay silent after their tenth occurrence until
+`RESET_THROTTLES` is sent, so an operator who has acted on one can see whether
+the condition recurs.
+
+### 3.11 Events
+
+| Event | Severity | Throttle | Description |
+|---|---|---|---|
+| `FailedReadCoherentData` | warning high | 10 | A read found no coherent copy within `MAX_READ_ITERATIONS` attempts and reported `INCOHERENT` |
+| `WatermarkReport` | activity high | none | Report of an entry's watermarks (§3.7) |
+| `WatermarksCleared` | activity high | none | An entry's watermarks were cleared by command |
+| `TlmDecodeFailed` | warning high | 10 | A mapped telemetry value did not decode as its mapping's type and was not stored |
+| `ReportWatermarksRejected` | warning low | none | A `REPORT_WATERMARKS` was rejected, with the reason |
+| `ClearWatermarksRejected` | warning low | none | A `CLEAR_WATERMARKS` was rejected, with the reason |
+| `ThrottlesReset` | activity high | none | The throttled warnings' throttles were reset by command |
 
 ## 4. Configuration
 
@@ -270,7 +340,7 @@ channel first arrives. The table must outlive the component.
 | `MAX_HISTORY_DEPTH` | Upper bound on any entry's depth. |
 | `DEFAULT_HISTORY_DEPTH` | Typical depth, used by the sample for most entries. |
 | `MAX_DATA_SIZE` | Maximum size of a string, structure, or byte-array measurement. |
-| `MAX_READ_ITERATIONS` | Read attempts before reporting `INCOHERENT`. |
+| `MAX_READ_ITERATIONS` | Read attempts, including the first, before reporting `INCOHERENT`. |
 
 History reads return only measurements actually stored: before an entry's ring
 fills, a read returns fewer records than its depth. Each record is a serialized
@@ -282,6 +352,11 @@ Memory used is
 `MAX_DATA_SIZE` multiplies by depth for *every* entry, including entries that
 only ever hold primitives, projects storing few structures should keep
 `MAX_DATA_SIZE` tight.
+
+Reads also use the caller's stack for their scratch copy: `getData` takes
+`MAX_DATA_SIZE` bytes, and `getHistory` and `getNHistory` take
+`MAX_HISTORY_DEPTH * SbsMeasurement::SERIALIZED_SIZE` bytes. Size the stacks of
+reading threads for these, especially after raising `MAX_DATA_SIZE`.
 
 ## 5. Usage
 
@@ -333,8 +408,12 @@ Retaining the previous `measTime` as `lastReadTime` on the next call is what
 produces `NOT_FRESH`, letting a consumer skip values it has already processed.
 `lastReadTime` is optional, as in the heritage interface, which accepted `NULL`:
 passing `Fw::ZERO_TIME` skips the freshness check, so a consumer that does not
-track freshness never sees `NOT_FRESH`. A measurement stamped with zero time can
-therefore never be reported `NOT_FRESH`.
+track freshness never sees `NOT_FRESH`. A measurement stamped with
+`Fw::ZERO_TIME` itself (time base `TB_NONE`, as an unconnected `timeCaller`
+produces) can therefore never be reported `NOT_FRESH`. Zero seconds in any other
+time base is an ordinary timestamp: `Fw::Time` comparison treats differing time
+bases as incomparable, so such a stamp passed back as `lastReadTime` is checked
+for freshness like any other.
 Freshness is judged by timestamp, so two stores within one tick of the time
 source look identical to a reader, and a component whose `timeCaller` is
 unconnected stamps every measurement with zero time.
@@ -342,17 +421,23 @@ unconnected stamps every measurement with zero time.
 ## 6. Assumptions and limitations
 
 - **One writer per entry.** As in the heritage design, where an entry is owned
-  by the subsystem producing it. Concurrent writers to the same entry are not
-  supported. Concurrent readers are safe, and a reader may safely race the
-  single writer.
+  by the subsystem producing it. The component enforces this for
+  telemetry-mapped entries, which refuse puts so that `tlmIn` is their only
+  writer. For every other entry it is an assumption: concurrent `putValue` or
+  `putData` callers on one entry are not supported, since overlapping writes can
+  leave the counter even mid-write and let a reader accept a torn copy.
+  Concurrent readers are safe.
 - **A torn read is detected, not prevented.** The counter tells a reader that a
   write intervened; it cannot stop one, so a reader racing a fast writer can
-  exhaust its retries and report `INCOHERENT`. Because the counter covers the
+  exhaust its attempts and report `INCOHERENT`. Because the counter covers the
   whole entry, a writer lapping the ring during a read is detected too.
-- **One privileged clearer.** `clearMinMax`, `clearAndGetMinMax`, and
-  `CLEAR_WATERMARKS` should not race one another on the same entry: a second
-  clear landing inside a `clearAndGetMinMax` can overwrite the retired
-  watermarks it is about to report.
+  Attempts run back to back, so a reader that preempts its writer mid-write —
+  a higher-priority reader under a strict-priority scheduler — fails every
+  attempt. Give readers no higher priority than the writers of the entries they
+  read, or treat `INCOHERENT` as a status to retry later.
+- **Clears are serialized.** `clearMinMax`, `clearAndGetMinMax`, and
+  `CLEAR_WATERMARKS` are guarded, so a clearer waits only for another clearer,
+  never for a put or a read.
 - **Type changes do not re-seed watermarks** — see §3.3.
 - **`configure()` is a new lifecycle requirement** that the heritage library did
   not have, since it allocated statically. A component whose `configure()` was
@@ -378,23 +463,27 @@ unconnected stamps every measurement with zero time.
 
 ## 8. Unit test coverage
 
-The unit tests cover 98% of the lines of `StateBufferStore.cpp` (496 of 505)
-and every function. gcovr counts 55.6% of branches (835 of 1502); most of the
-remainder are the failure branches of `FW_ASSERT`s and of code generated by the
-compiler, in line with comparable components such as `Svc::TimeConverter`.
+The unit tests cover 97% of the lines of `StateBufferStore.cpp` (483 of 494)
+and every function. gcovr counts 55.5% of branches across the component's
+source and header (962 of 1734); most of the remainder are the failure branches
+of `FW_ASSERT`s and of code generated by the compiler, in line with comparable
+components such as `Svc::TimeConverter`.
 
 The uncovered lines are:
 
 - Paths reached only when a writer interleaves with a reader on another thread,
   which a single-threaded test cannot arrange: clamping a torn payload size,
   a history serialization that fails on a torn copy, and an entry whose kind is
-  claimed during a watermark read. The retry and `INCOHERENT` paths themselves
-  are covered through a test-only hook that forces torn reads.
+  claimed as data during a watermark or history read, or as a value entry
+  between a data put's kind check and its claim. The retry and
+  `INCOHERENT` paths themselves are covered through a test-only hook that
+  forces torn reads.
 - The `default` case of the telemetry type switch, unreachable because the
   generated `SbsTlmType` asserts on construction from an undefined value.
+- The closing lines of `getMinMax_handler` and `clearAndGetMinMax_handler`,
+  which gcov reports as unexecuted although both handlers are exercised.
 
-The assertion paths — use before `configure()`, configuring twice, an
-N-measurement read deeper than the entry, an oversized data put, an untyped
+The assertion paths — use before `configure()`, configuring twice, an untyped
 value, and a malformed telemetry table — are verified by death tests. Death
 tests run in a child process that exits through the assertion, so they do not
 contribute to the coverage figures. A short allocation is not tested: the
@@ -408,3 +497,10 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-05 | Initial version, ported from a heritage state buffer store module |
 | 2026-10-07 | Sequence-lock coherency covering watermarks and whole history dumps; entry kinds; `SbsMeasurement` history records; explicit allocator in `configure()` |
 | 2026-10-07 | `tlmIn` telemetry port with a `configure()` mapping table; per-entry depth bounds in the sample configuration; coverage section |
+| 2026-10-09 | Review fixes: `FailedReadCoherentData` is warning high; guarded clearers; telemetry-mapped entries refuse puts; torn reads copy nothing out and a torn clear-and-get keeps its watermarks; bool watermarks; `WRONG_KIND` checked first on history reads; ports, commands, and events sections |
+| 2026-10-09 | `getNHistory` returns the entry's full depth for a request deeper than it, rather than asserting |
+| 2026-10-09 | `getNHistory` reports `INVALID_BUFFER_SIZE` when its buffer cannot hold one measurement |
+| 2026-10-09 | `FailedReadCoherentData` throttled at 10; `RESET_THROTTLES` command and `ThrottlesReset` event |
+| 2026-10-09 | `getNHistory`'s `numMeasurements` is `FwSizeType`, matching entry depths |
+| 2026-10-09 | Puts accept only `OK` or `INVALID` validity, refusing any other with `WRONG_KIND` |
+| 2026-10-09 | `putData` reports `INVALID_BUFFER_SIZE` for data larger than `MAX_DATA_SIZE`, rather than asserting |

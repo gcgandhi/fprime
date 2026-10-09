@@ -18,9 +18,9 @@ module Svc {
         NOT_WRITTEN = 2          @< measurement has never been written
         INVALID = 3              @< measurement marked invalid by the writer
         NOT_FRESH = 4            @< measurement unchanged since the caller's last read
-        INVALID_BUFFER_SIZE = 5  @< caller buffer too small for the full history
+        INVALID_BUFFER_SIZE = 5  @< caller buffer too small for the read, or data larger than MAX_DATA_SIZE
         INCOHERENT = 6           @< no coherent read within MAX_READ_ITERATIONS
-        WRONG_KIND = 7           @< entry holds the other kind of measurement (value vs. data)
+        WRONG_KIND = 7           @< entry holds the other kind of measurement (value vs. data), or a put's validity is not OK or INVALID
     }
 
     @ A stored measurement: a value, when it was written, and its validity
@@ -55,11 +55,13 @@ module Svc {
     }
 
     @ Store a primitive measurement, timestamped by the component.
-    @ Reports WRONG_KIND and stores nothing if the entry holds data
+    @ Reports WRONG_KIND and stores nothing if the entry holds data or is
+    @ mapped to a telemetry channel, which only tlmIn may write, or if
+    @ validity is not OK or INVALID
     port SbsPut(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to write
         ref val: Fw.PolyType                    @< value to store
-        validity: SbsStatus                     @< validity to record with the value
+        validity: SbsStatus                     @< validity to record with the value: OK or INVALID
     ) -> SbsStatus
 
     @ Get the latest primitive measurement for an entry
@@ -104,21 +106,26 @@ module Svc {
 
     @ Get an entry's most recent numMeasurements measurements, oldest first,
     @ in the getHistory record format. numMeasurements == 0 requests the
-    @ entry's full depth. A buffer too small for the request is filled with as
-    @ many whole measurements as fit. Value entries only
+    @ entry's full depth, as does a numMeasurements deeper than the entry. A
+    @ buffer too small for the request is filled with as many whole
+    @ measurements as fit; one too small for a single measurement reports
+    @ INVALID_BUFFER_SIZE and copies nothing. Value entries only
     port SbsGetNHistory(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to read
-        numMeasurements: U16                    @< how many to read; 0 means full depth
+        numMeasurements: FwSizeType             @< how many to read; 0 means full depth
         ref data: Fw.Buffer                     @< filled with serialized measurements
         ref sizeOut: FwSizeType                 @< bytes written to data
     ) -> SbsStatus
 
     @ Store a string, struct, or byte-array measurement, timestamped by the
     @ component. Reports WRONG_KIND and stores nothing if the entry holds values
+    @ or validity is not OK or INVALID,
+    @ and INVALID_BUFFER_SIZE and stores nothing if data is larger than
+    @ StateBufferStoreCfg.MAX_DATA_SIZE
     port SbsPutData(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to write
         ref data: Fw.Buffer                     @< bytes to store
-        validity: SbsStatus                     @< validity to record with the value
+        validity: SbsStatus                     @< validity to record with the value: OK or INVALID
     ) -> SbsStatus
 
     @ Get the latest string, struct, or byte-array measurement for an entry

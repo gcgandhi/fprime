@@ -29,6 +29,14 @@ TEST(Nominal, PutWithValidity) {
     tester.putWithValidityTest();
 }
 
+TEST(OffNominal, PutRefusesStoreStatus) {
+    COMMENT("A put whose validity is a store-generated status is refused and stores nothing");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-001");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-002");
+    Svc::StateBufferStoreTester tester;
+    tester.putRefusesStoreStatusTest();
+}
+
 TEST(OffNominal, NotWritten) {
     COMMENT("An entry never written reports NOT_WRITTEN");
     REQUIREMENT("REQ-STATEBUFFERSTORE-013");
@@ -151,7 +159,7 @@ TEST(Nominal, TornReadRecovers) {
 }
 
 TEST(OffNominal, TornReadExhausted) {
-    COMMENT("A read torn on every attempt reports INCOHERENT and a FATAL event");
+    COMMENT("A read torn on every attempt reports INCOHERENT and a warning event");
     REQUIREMENT("REQ-STATEBUFFERSTORE-014");
     Svc::StateBufferStoreTester tester;
     tester.tornReadExhaustedTest();
@@ -238,10 +246,24 @@ TEST(Nominal, ClearAndGetRacingPut) {
 }
 
 TEST(OffNominal, WatermarkTornRead) {
-    COMMENT("Watermark reads torn on every attempt report INCOHERENT and a FATAL event");
+    COMMENT("Watermark reads torn on every attempt report INCOHERENT and a warning event");
     REQUIREMENT("REQ-STATEBUFFERSTORE-014");
     Svc::StateBufferStoreTester tester;
     tester.watermarkTornReadTest();
+}
+
+TEST(Nominal, BoolWatermark) {
+    COMMENT("Bool watermarks order false before true");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-005");
+    Svc::StateBufferStoreTester tester;
+    tester.boolWatermarkTest();
+}
+
+TEST(OffNominal, DataEntryKindCheckedFirst) {
+    COMMENT("History reads of a data entry report WRONG_KIND before judging the request");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    Svc::StateBufferStoreTester tester;
+    tester.dataEntryKindCheckedFirstTest();
 }
 
 TEST(Nominal, PerEntryDepth) {
@@ -287,12 +309,28 @@ TEST(OffNominal, TlmDecodeFailed) {
     tester.tlmDecodeFailedTest();
 }
 
+TEST(OffNominal, ThrottleReset) {
+    COMMENT("Throttled warnings stop at their throttle and resume after RESET_THROTTLES");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-014");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.throttleResetTest();
+}
+
 TEST(OffNominal, TlmEntryRefusesData) {
     COMMENT("An entry mapped to telemetry refuses data puts before any telemetry arrives");
     REQUIREMENT("REQ-STATEBUFFERSTORE-016");
     REQUIREMENT("REQ-STATEBUFFERSTORE-017");
     Svc::StateBufferStoreTester tester;
     tester.tlmEntryRefusesDataTest();
+}
+
+TEST(OffNominal, TlmEntryRefusesValue) {
+    COMMENT("A telemetry-mapped entry refuses value puts and data reads");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmEntryRefusesValueTest();
 }
 
 TEST(Death, Unconfigured) {
@@ -309,18 +347,26 @@ TEST(Death, ConfigureTwice) {
     tester.configureTwiceDeathTest();
 }
 
-TEST(Death, NHistoryTooDeep) {
-    COMMENT("An N-measurement read deeper than the entry asserts");
+TEST(OffNominal, NHistoryNoRoom) {
+    COMMENT("An N-measurement read into a buffer too small for one measurement reports INVALID_BUFFER_SIZE");
     REQUIREMENT("REQ-STATEBUFFERSTORE-009");
     Svc::StateBufferStoreTester tester;
-    tester.nHistoryTooDeepDeathTest();
+    tester.nHistoryNoRoomTest();
 }
 
-TEST(Death, OversizedPutData) {
-    COMMENT("A data put larger than MAX_DATA_SIZE asserts");
-    REQUIREMENT("REQ-STATEBUFFERSTORE-011");
+TEST(Nominal, NHistoryTooDeep) {
+    COMMENT("An N-measurement read deeper than the entry returns its full depth");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-009");
     Svc::StateBufferStoreTester tester;
-    tester.oversizedPutDataDeathTest();
+    tester.nHistoryTooDeepTest();
+}
+
+TEST(OffNominal, OversizedPutData) {
+    COMMENT("A data put larger than MAX_DATA_SIZE reports INVALID_BUFFER_SIZE and stores nothing");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-011");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    Svc::StateBufferStoreTester tester;
+    tester.oversizedPutDataTest();
 }
 
 TEST(Death, UntypedPut) {

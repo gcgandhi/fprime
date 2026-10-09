@@ -53,11 +53,13 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     // Types
     // ----------------------------------------------------------------------
 
-    //! Which interface an entry is used through, fixed by its first store
+    //! Which interface an entry is used through, fixed by its first store or,
+    //! for a telemetry-mapped entry, by configure()
     enum EntryKind : U8 {
         KIND_UNSET = 0,  //!< never stored to
         KIND_VALUE = 1,  //!< stored through putValue
         KIND_DATA = 2,   //!< stored through putData
+        KIND_TLM = 3,    //!< a value entry stored only through tlmIn, so it has a single writer
     };
 
     //! A stored measurement, as held internally
@@ -78,7 +80,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
         Measurement* history;               //!< ring of depth measurements
         U8* data;                           //!< depth payload slots of MAX_DATA_SIZE bytes
         std::atomic<U32> coherencyCounter;  //!< odd while a write is in progress
-        std::atomic<U8> kind;               //!< EntryKind, claimed by the first store
+        std::atomic<U8> kind;               //!< EntryKind, claimed by the first store or by configure()
         std::atomic<bool> clearPending;     //!< when set, the next put starts new watermarks
         FwSizeType depth;                   //!< configured history depth
         FwSizeType latest;                  //!< index of the most recent measurement
@@ -88,6 +90,47 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
         Measurement retiredMin;             //!< minimum displaced by the most recent clear
         Measurement retiredMax;             //!< maximum displaced by the most recent clear
         FwSizeType index;                   //!< this entry's own index, for event reporting
+    };
+
+    //! An entry's latest measurement, as copied by one read attempt
+    struct ValueSnapshot {
+        Measurement measurement;  //!< the latest measurement
+        FwSizeType stored = 0;    //!< measurements stored
+        U8 kind = KIND_UNSET;     //!< the entry's kind
+        void copy(const Entry& block);
+    };
+
+    //! An entry's latest measurement and payload, as copied by one read attempt
+    struct DataSnapshot {
+        Measurement measurement;                              //!< the latest measurement
+        U8 payload[StateBufferStoreCfg::MAX_DATA_SIZE] = {};  //!< its payload bytes
+        FwSizeType stored = 0;                                //!< measurements stored
+        U8 kind = KIND_UNSET;                                 //!< the entry's kind
+        void copy(const Entry& block);
+    };
+
+    //! An entry's watermarks, as copied by one read attempt
+    struct WatermarkSnapshot {
+        bool clear = false;           //!< in: whether this read clears the watermarks
+        bool alreadyCleared = false;  //!< in: whether a clear was already pending before this read's
+        Measurement min;              //!< the minimum to report
+        Measurement max;              //!< the maximum to report
+        bool cleared = false;         //!< whether the watermarks read back as cleared
+        FwSizeType stored = 0;        //!< measurements stored
+        U8 kind = KIND_UNSET;         //!< the entry's kind
+        void copy(const Entry& block);
+    };
+
+    //! An entry's most recent measurements, serialized by one read attempt
+    struct HistorySnapshot {
+        FwSizeType count = 0;  //!< in: how many measurements to serialize
+        //! the serialized records, held until the read proves coherent
+        U8 records[StateBufferStoreCfg::MAX_HISTORY_DEPTH * SbsMeasurement::SERIALIZED_SIZE] = {};
+        FwSizeType copied = 0;   //!< records serialized
+        FwSizeType stored = 0;   //!< measurements stored
+        U8 kind = KIND_UNSET;    //!< the entry's kind
+        bool serialized = true;  //!< whether every record serialized
+        void copy(const Entry& block);
     };
 
     // ----------------------------------------------------------------------
@@ -146,7 +189,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Handler implementation for getNHistory
     Svc::SbsStatus getNHistory_handler(FwIndexType portNum,
                                        const Svc::StateBufferStoreCfg::StateEntry& entry,
-                                       U16 numMeasurements,
+                                       FwSizeType numMeasurements,
                                        Fw::Buffer& data,
                                        FwSizeType& sizeOut) override;
 
@@ -167,6 +210,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
                                      U32 cmdSeq,
                                      const Svc::StateBufferStoreCfg::StateEntry& entry) override;
 
+    //! Handler implementation for command RESET_THROTTLES
+    void RESET_THROTTLES_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) override;
+
     // ----------------------------------------------------------------------
     // Helpers
     // ----------------------------------------------------------------------
@@ -177,25 +223,52 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Fix an entry's kind on its first store
     //!
     //! Returns true when the entry is, or has just become, of the given kind.
-    static bool claimKind(Entry& entry, EntryKind kind);
+    static bool claimKind(Entry& block, EntryKind kind);
 
     //! Mark an entry as being written, making its counter odd
-    static void beginWrite(Entry& entry);
+    static void beginWrite(Entry& block);
 
     //! Mark an entry's write complete, making its counter even again
-    static void endWrite(Entry& entry);
+    static void endWrite(Entry& block);
 
     //! Sample the coherency counter at the start of a read attempt
     //!
     //! Not static so that unit tests can force a torn read: nothing in a
     //! single-threaded test can interleave a write. See docs/sdd.md.
-    U32 beginRead(Entry& entry);
+    U32 beginRead(Entry& block);
 
     //! Report whether the read attempt begun with before saw a coherent entry
-    static bool endRead(const Entry& entry, U32 before);
+    static bool endRead(const Entry& block, U32 before);
+
+    //! Copy an entry into a snapshot, retrying torn copies
+    //!
+    //! Returns false, having emitted FailedReadCoherentData, when no attempt
+    //! within MAX_READ_ITERATIONS was coherent.
+    template <typename Snapshot>
+    bool coherentRead(Entry& block, StateBufferStore_ReadOperation operation, Snapshot& snapshot);
+
+    //! Whether an entry kind holds primitive values
+    static bool isValueKind(U8 kind);
+
+    //! Whether a writer may record a validity: only OK and INVALID
+    static bool isWriterValidity(const SbsStatus& validity);
+
+    //! Order two values for watermark tracking
+    static bool lessThan(const Fw::PolyType& lhs, const Fw::PolyType& rhs);
+
+    //! Mark an entry's watermarks to be cleared by its next put
+    static SbsStatus clearWatermarks(Entry& block);
+
+    //! Advance an entry's ring to the slot its next measurement fills, within a write
+    //!
+    //! Updates latest and the saturating stored count, and returns the slot.
+    static FwSizeType appendSlot(Entry& block);
+
+    //! The status a latest-value read reports for a coherent copy
+    static SbsStatus latestStatus(FwSizeType stored, const Measurement& measurement, const Fw::Time& lastReadTime);
 
     //! Store a value in a value entry, as one write
-    static void storeValue(Entry& entry, const Fw::PolyType& val, const Fw::Time& time, const SbsStatus& validity);
+    static void storeValue(Entry& block, const Fw::PolyType& val, const Fw::Time& time, const SbsStatus& validity);
 
     //! Decode a serialized telemetry value as the given type
     //!
@@ -203,17 +276,16 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     static Fw::SerializeStatus decodeTlm(const SbsTlmType& type, Fw::TlmBuffer& val, Fw::PolyType& out);
 
     //! Update an entry's watermarks with a newly stored value, within a write
-    static void updateWatermarks(Entry& entry,
+    static void updateWatermarks(Entry& block,
                                  const Fw::PolyType& val,
                                  const Fw::Time& time,
                                  const SbsStatus& validity);
 
     //! Read an entry's watermarks coherently, optionally clearing them
     //!
-    //! With clear set, the watermarks reported are exactly those that the
-    //! clear ends, even if a put consumes the clear before they are read.
-    SbsStatus readWatermarks(Entry& entry,
-                             bool clear,
+    //! CLEAR_AND_GET_MIN_MAX also clears them, reporting exactly the watermarks
+    //! the clear ends, even if a put consumes the clear before they are read.
+    SbsStatus readWatermarks(Entry& block,
                              StateBufferStore_ReadOperation operation,
                              Svc::SbsMeasurement& min,
                              Svc::SbsMeasurement& max);
@@ -235,7 +307,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     static I64 toMicroseconds(const Fw::Time& time);
 
     //! Coherently serialize the most recent count measurements of an entry, oldest first
-    SbsStatus readHistory(Entry& entry,
+    SbsStatus readHistory(Entry& block,
                           FwSizeType count,
                           StateBufferStore_ReadOperation operation,
                           Fw::Buffer& data,
