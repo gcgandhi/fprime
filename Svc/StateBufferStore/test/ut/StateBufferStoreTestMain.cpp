@@ -181,7 +181,7 @@ TEST(Nominal, ClearWatermarksCommand) {
 
 TEST(OffNominal, InvalidEntryCommand) {
     COMMENT("Commands naming the sizing counter are rejected");
-    REQUIREMENT("REQ-STATEBUFFERSTORE-010");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-019");
     Svc::StateBufferStoreTester tester;
     tester.invalidEntryCommandTest();
 }
@@ -259,8 +259,15 @@ TEST(Nominal, BoolWatermark) {
     tester.boolWatermarkTest();
 }
 
+TEST(Nominal, NanWatermark) {
+    COMMENT("A floating-point NaN never becomes a watermark");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-005");
+    Svc::StateBufferStoreTester tester;
+    tester.nanWatermarkTest();
+}
+
 TEST(OffNominal, DataEntryKindCheckedFirst) {
-    COMMENT("History reads of a data entry report WRONG_KIND before judging the request");
+    COMMENT("A full-history read of a data entry reports WRONG_KIND before judging its buffer");
     REQUIREMENT("REQ-STATEBUFFERSTORE-016");
     Svc::StateBufferStoreTester tester;
     tester.dataEntryKindCheckedFirstTest();
@@ -313,6 +320,7 @@ TEST(OffNominal, ThrottleReset) {
     COMMENT("Throttled warnings stop at their throttle and resume after RESET_THROTTLES");
     REQUIREMENT("REQ-STATEBUFFERSTORE-014");
     REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-018");
     Svc::StateBufferStoreTester tester;
     tester.throttleResetTest();
 }
@@ -359,6 +367,16 @@ TEST(Nominal, NHistoryTooDeep) {
     REQUIREMENT("REQ-STATEBUFFERSTORE-009");
     Svc::StateBufferStoreTester tester;
     tester.nHistoryTooDeepTest();
+}
+
+TEST(OffNominal, EmptyBuffer) {
+    COMMENT("An empty Fw::Buffer is judged by its size on every port, never asserted on");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-004");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-008");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-009");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-011");
+    Svc::StateBufferStoreTester tester;
+    tester.emptyBufferTest();
 }
 
 TEST(OffNominal, OversizedPutData) {

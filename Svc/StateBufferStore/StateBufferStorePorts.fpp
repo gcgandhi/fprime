@@ -10,17 +10,18 @@ module Svc {
     @ Validity of a stored measurement, or the result of a store operation.
     @
     @ Values 0-5 are preserved from the heritage status enumeration so that ported
-    @ requirements and ground tooling keep their meaning. INCOHERENT and
-    @ WRONG_KIND are new.
+    @ requirements and ground tooling keep their meaning. INCOHERENT,
+    @ WRONG_KIND, and INVALID_VALIDITY are new.
     enum SbsStatus: U8 {
         OK = 0                   @< measurement value is okay
         UNINITIALIZED = 1        @< retained for heritage trace; unreachable, see sdd.md
         NOT_WRITTEN = 2          @< measurement has never been written
         INVALID = 3              @< measurement marked invalid by the writer
         NOT_FRESH = 4            @< measurement unchanged since the caller's last read
-        INVALID_BUFFER_SIZE = 5  @< caller buffer too small for the read, or data larger than MAX_DATA_SIZE
+        INVALID_BUFFER_SIZE = 5  @< caller buffer too small for the read, or put data null or larger than MAX_DATA_SIZE
         INCOHERENT = 6           @< no coherent read within MAX_READ_ITERATIONS
-        WRONG_KIND = 7           @< entry holds the other kind of measurement (value vs. data), or a put's validity is not OK or INVALID
+        WRONG_KIND = 7           @< entry holds the other kind of measurement (value vs. data), or only tlmIn may write it
+        INVALID_VALIDITY = 8     @< a put's validity is not OK or INVALID
     }
 
     @ A stored measurement: a value, when it was written, and its validity
@@ -56,8 +57,8 @@ module Svc {
 
     @ Store a primitive measurement, timestamped by the component.
     @ Reports WRONG_KIND and stores nothing if the entry holds data or is
-    @ mapped to a telemetry channel, which only tlmIn may write, or if
-    @ validity is not OK or INVALID
+    @ mapped to a telemetry channel, which only tlmIn may write, and
+    @ INVALID_VALIDITY and stores nothing if validity is not OK or INVALID
     port SbsPut(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to write
         ref val: Fw.PolyType                    @< value to store
@@ -109,7 +110,8 @@ module Svc {
     @ entry's full depth, as does a numMeasurements deeper than the entry. A
     @ buffer too small for the request is filled with as many whole
     @ measurements as fit; one too small for a single measurement reports
-    @ INVALID_BUFFER_SIZE and copies nothing. Value entries only
+    @ INVALID_BUFFER_SIZE and copies nothing, unless the read itself fails or
+    @ finds the entry never written, which is reported instead. Value entries only
     port SbsGetNHistory(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to read
         numMeasurements: FwSizeType             @< how many to read; 0 means full depth
@@ -118,9 +120,9 @@ module Svc {
     ) -> SbsStatus
 
     @ Store a string, struct, or byte-array measurement, timestamped by the
-    @ component. Reports WRONG_KIND and stores nothing if the entry holds values
-    @ or validity is not OK or INVALID,
-    @ and INVALID_BUFFER_SIZE and stores nothing if data is larger than
+    @ component. Reports WRONG_KIND and stores nothing if the entry holds values,
+    @ INVALID_VALIDITY and stores nothing if validity is not OK or INVALID,
+    @ and INVALID_BUFFER_SIZE and stores nothing if data is null or larger than
     @ StateBufferStoreCfg.MAX_DATA_SIZE
     port SbsPutData(
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to write

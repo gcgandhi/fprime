@@ -13,8 +13,9 @@ module Svc {
     @ NUM_ENTRIES is a sizing counter, not a usable entry: FPP has no
     @ equivalent of the generated C++ NUM_CONSTANTS available for array
     @ sizing, so the count must be an explicit last member. Passing
-    @ NUM_ENTRIES to any StateBufferStore port is a programming error and
-    @ trips an assertion.
+    @ NUM_ENTRIES to a StateBufferStore store or read port, or naming it in a
+    @ telemetry mapping, is a programming error and trips an assertion;
+    @ commands naming it are rejected.
     enum StateEntry: U32 {
       @ Entry 0
       SBS_ENTRY_00

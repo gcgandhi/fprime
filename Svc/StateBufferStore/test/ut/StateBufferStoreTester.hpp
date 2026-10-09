@@ -127,6 +127,9 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A data entry reports NOT_WRITTEN and NOT_FRESH like a primitive entry
     void dataStatusTest();
 
+    //! An empty Fw::Buffer is judged by its size on every port, never asserted on
+    void emptyBufferTest();
+
     //! A data put larger than MAX_DATA_SIZE reports INVALID_BUFFER_SIZE and stores nothing
     void oversizedPutDataTest();
 
@@ -155,7 +158,10 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! Bool watermarks order false before true
     void boolWatermarkTest();
 
-    //! History reads of a data entry report WRONG_KIND before judging the request
+    //! A floating-point NaN never becomes a watermark
+    void nanWatermarkTest();
+
+    //! A full-history read of a data entry reports WRONG_KIND before judging its buffer
     void dataEntryKindCheckedFirstTest();
 
     //! Each entry keeps its own configured depth, including the bounds

@@ -5,6 +5,7 @@
 
 #include "Svc/StateBufferStore/StateBufferStore.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <new>
 
@@ -32,6 +33,49 @@ Fw::SerializeStatus decodeAs(Fw::SerialBuffer& reader, Fw::PolyType& out) {
         out = Fw::PolyType(value);
     }
     return status;
+}
+
+//! Whether an atomic of unsigned integral width WIDTH can ever be lock-free
+//!
+//! C++14 lacks std::atomic<T>::is_always_lock_free (C++17), so this is derived
+//! from the standard ATOMIC_*_LOCK_FREE macros (0 = never, 1 = sometimes,
+//! 2 = always), matched by width so no ABI is assumed, as in
+//! Os/Generic/LocklessPriorityQueue.hpp. A never-lock-free width fails the
+//! build; a sometimes-lock-free one is caught by the check in configure().
+template <FwSizeType WIDTH>
+struct AtomicMayBeLockFree {
+    static constexpr bool value = ((sizeof(unsigned char) == WIDTH) && (ATOMIC_CHAR_LOCK_FREE != 0)) ||
+                                  ((sizeof(unsigned short) == WIDTH) && (ATOMIC_SHORT_LOCK_FREE != 0)) ||
+                                  ((sizeof(unsigned int) == WIDTH) && (ATOMIC_INT_LOCK_FREE != 0)) ||
+                                  ((sizeof(unsigned long) == WIDTH) && (ATOMIC_LONG_LOCK_FREE != 0)) ||
+                                  ((sizeof(unsigned long long) == WIDTH) && (ATOMIC_LLONG_LOCK_FREE != 0));
+};
+
+// An atomic emulated with a lock would let a preempted writer block readers,
+// defeating the lock-free coherency protocol and risking priority inversion
+static_assert(AtomicMayBeLockFree<sizeof(U32)>::value, "std::atomic<U32> is never lock-free on this platform");
+static_assert(AtomicMayBeLockFree<sizeof(U8)>::value, "std::atomic<U8> is never lock-free on this platform");
+static_assert(ATOMIC_BOOL_LOCK_FREE != 0, "std::atomic<bool> is never lock-free on this platform");
+
+static_assert(StateBufferStoreCfg::MAX_READ_ITERATIONS >= 1,
+              "MAX_READ_ITERATIONS counts attempts, including the first, and must be at least 1");
+static_assert(StateBufferStoreCfg::MIN_HISTORY_DEPTH >= 2, "REQ-STATEBUFFERSTORE-010 requires a depth of at least 2");
+static_assert(StateBufferStoreCfg::MIN_HISTORY_DEPTH <= StateBufferStoreCfg::MAX_HISTORY_DEPTH,
+              "MIN_HISTORY_DEPTH exceeds MAX_HISTORY_DEPTH");
+
+//! Whether a PolyType holds a floating-point NaN
+bool isNaN(const Fw::PolyType& value) {
+    if (value.isF32()) {
+        F32 stored = 0.0f;
+        value.get(stored);
+        return std::isnan(stored);
+    }
+    if (value.isF64()) {
+        F64 stored = 0.0;
+        value.get(stored);
+        return std::isnan(stored);
+    }
+    return false;
 }
 
 //! Pull a stored value of type T out of a PolyType, widened to F64
@@ -88,6 +132,13 @@ void StateBufferStore::configure(FwEnumStoreType memId,
                                  Fw::MemAllocator& allocator,
                                  const Fw::ExternalArray<SbsTlmMapping>& tlmMappings) {
     FW_ASSERT(not this->m_initialized);
+
+    // The authoritative lock-free check where the static_asserts can only say
+    // "sometimes": every entry's atomics share these types, so one entry speaks for all
+    const Entry& probe = this->m_entries[0];
+    FW_ASSERT(probe.coherencyCounter.is_lock_free());
+    FW_ASSERT(probe.kind.is_lock_free());
+    FW_ASSERT(probe.clearPending.is_lock_free());
 
     // Validated before allocating, so a bad table fails without a dangling allocation
     for (FwSizeType i = 0; i < tlmMappings.getSize(); i++) {
@@ -155,7 +206,8 @@ void StateBufferStore::configure(FwEnumStoreType memId,
 
     // Mapped entries are claimed for telemetry from the start, so any put to
     // one is refused even before its channel first arrives: tlmIn is the
-    // entry's only writer, as the coherency counter requires
+    // entry's only writer port, which the coherency counter requires (the
+    // channel's producer must also emit it from one thread at a time)
     for (FwSizeType i = 0; i < tlmMappings.getSize(); i++) {
         this->m_entries[static_cast<FwSizeType>(tlmMappings[i].get_entry())].kind.store(KIND_TLM,
                                                                                         std::memory_order_relaxed);
@@ -178,6 +230,8 @@ StateBufferStore::Entry& StateBufferStore::checkedEntry(const StateBufferStoreCf
 }
 
 bool StateBufferStore::claimKind(Entry& block, EntryKind kind) {
+    // Exact-kind match, not isValueKind: a KIND_TLM entry must fail a
+    // KIND_VALUE claim, which is what keeps tlmIn its only writer port
     U8 current = KIND_UNSET;
     if (block.kind.compare_exchange_strong(current, static_cast<U8>(kind), std::memory_order_acq_rel,
                                            std::memory_order_acquire)) {
@@ -275,6 +329,8 @@ void StateBufferStore::HistorySnapshot::copy(const Entry& block) {
     // Only measurements actually stored are reported: an unwritten slot
     // holds an untyped PolyType, which cannot be serialized
     this->copied = (this->count < this->stored) ? this->count : this->stored;
+    // Reset per attempt: a torn attempt's failure must not survive into a
+    // retry that proves coherent, or the caller's FW_ASSERT on it would fire
     this->serialized = true;
     // A data entry's slots hold no value to serialize
     if (not StateBufferStore::isValueKind(this->kind)) {
@@ -422,6 +478,11 @@ void StateBufferStore::updateWatermarks(Entry& block,
     // constructor's note on PolyType comparison across differing types.
     // Consuming it inside the write, and retiring the watermarks it ends,
     // lets readWatermarks report an epoch this put has already closed.
+    // NaN orders against nothing, so as a seed it would freeze both
+    // watermarks; it is skipped, leaving any pending clear for the next value.
+    if (isNaN(val)) {
+        return;
+    }
     if (block.clearPending.exchange(false, std::memory_order_acq_rel)) {
         block.retiredMin = block.min;
         block.retiredMax = block.max;
@@ -452,10 +513,9 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
     if (block.kind.load(std::memory_order_acquire) == KIND_DATA) {
         return SbsStatus::WRONG_KIND;
     }
-    WatermarkSnapshot snapshot;
-    snapshot.clear = clear;
     // A clear that finds one already pending ends an epoch with no puts in it
-    snapshot.alreadyCleared = clear and block.clearPending.exchange(true, std::memory_order_acq_rel);
+    const bool alreadyCleared = clear and block.clearPending.exchange(true, std::memory_order_acq_rel);
+    WatermarkSnapshot snapshot(clear, alreadyCleared);
 
     if (not this->coherentRead(block, operation, snapshot)) {
         if (clear and not snapshot.alreadyCleared) {
@@ -487,7 +547,8 @@ void StateBufferStore::reportWatermark(const Measurement& source, bool cleared, 
 
 F64 StateBufferStore::toF64(const Fw::PolyType& value) {
     // PolyType has no generic numeric accessor, so each stored type is pulled
-    // out through its own checker. An entry never written holds no type.
+    // out through its own checker. A cleared watermark holds no type, and a
+    // stored pointer has no numeric value; both report as 0.0.
     if (value.isU8()) {
         return widen<U8>(value);
     }
@@ -540,13 +601,9 @@ SbsStatus StateBufferStore::readHistory(Entry& block,
                                         FwSizeType& sizeOut) {
     sizeOut = 0;
     FW_ASSERT(count <= block.depth, static_cast<FwAssertArgType>(count), static_cast<FwAssertArgType>(block.depth));
-    U8* const out = data.getData();
-    FW_ASSERT(out != nullptr);
-
     // Serialized into the snapshot, not the caller's buffer, so a read that
     // never proves coherent copies nothing out
-    HistorySnapshot snapshot;
-    snapshot.count = count;
+    HistorySnapshot snapshot(count);
     if (not this->coherentRead(block, operation, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
@@ -555,7 +612,13 @@ SbsStatus StateBufferStore::readHistory(Entry& block,
     }
     FW_ASSERT(snapshot.serialized);
     sizeOut = snapshot.copied * HISTORY_RECORD_SIZE;
-    (void)::memcpy(out, snapshot.records, sizeOut);
+    // Callers judge the buffer by its size, so an empty Fw::Buffer (as an
+    // exhausted BufferManager returns) reaches here only with nothing to copy
+    if (sizeOut > 0) {
+        U8* const out = data.getData();
+        FW_ASSERT(out != nullptr);
+        (void)::memcpy(out, snapshot.records, sizeOut);
+    }
     return (snapshot.stored > 0) ? SbsStatus::OK : SbsStatus::NOT_WRITTEN;
 }
 
@@ -574,7 +637,7 @@ SbsStatus StateBufferStore::putValue_handler(FwIndexType portNum,
     // An untyped value cannot be serialized into a history dump
     FW_ASSERT(StateBufferStore::isTyped(val));
     if (not StateBufferStore::isWriterValidity(validity)) {
-        return SbsStatus::WRONG_KIND;
+        return SbsStatus::INVALID_VALIDITY;
     }
     if (not StateBufferStore::claimKind(block, KIND_VALUE)) {
         return SbsStatus::WRONG_KIND;
@@ -609,16 +672,16 @@ SbsStatus StateBufferStore::putData_handler(FwIndexType portNum,
     Entry& block = this->checkedEntry(entry);
     const Fw::Time now = this->getTime();
     const FwSizeType size = data.getSize();
-    FW_ASSERT(data.getData() != nullptr);
     if (not StateBufferStore::isWriterValidity(validity)) {
-        return SbsStatus::WRONG_KIND;
+        return SbsStatus::INVALID_VALIDITY;
     }
     // A value entry is refused as such before its payload is judged, and an
     // oversized payload is refused before it can claim an unset entry
     if (StateBufferStore::isValueKind(block.kind.load(std::memory_order_acquire))) {
         return SbsStatus::WRONG_KIND;
     }
-    if (size > StateBufferStoreCfg::MAX_DATA_SIZE) {
+    // A null buffer, such as an exhausted BufferManager returns, holds nothing to store
+    if ((data.getData() == nullptr) or (size > StateBufferStoreCfg::MAX_DATA_SIZE)) {
         return SbsStatus::INVALID_BUFFER_SIZE;
     }
     if (not StateBufferStore::claimKind(block, KIND_DATA)) {
@@ -643,7 +706,6 @@ SbsStatus StateBufferStore::getData_handler(FwIndexType portNum,
                                             FwSizeType& sizeOut) {
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
-    FW_ASSERT(data.getData() != nullptr);
 
     DataSnapshot snapshot;
     if (not this->coherentRead(block, StateBufferStore_ReadOperation::GET_DATA, snapshot)) {
@@ -657,7 +719,11 @@ SbsStatus StateBufferStore::getData_handler(FwIndexType portNum,
         return SbsStatus::INVALID_BUFFER_SIZE;
     }
 
-    (void)::memcpy(data.getData(), snapshot.payload, measurement.dataSize);
+    // The size check above leaves an empty Fw::Buffer here only with nothing to copy
+    if (measurement.dataSize > 0) {
+        FW_ASSERT(data.getData() != nullptr);
+        (void)::memcpy(data.getData(), snapshot.payload, measurement.dataSize);
+    }
     sizeOut = measurement.dataSize;
     measTime = measurement.time;
     return StateBufferStore::latestStatus(snapshot.stored, measurement, lastReadTime);
@@ -727,7 +793,9 @@ SbsStatus StateBufferStore::getNHistory_handler(FwIndexType portNum,
     const SbsStatus status =
         this->readHistory(block, count, StateBufferStore_ReadOperation::GET_N_HISTORY, data, sizeOut);
     // With measurements to report but no room for one, truncation would
-    // otherwise report success with nothing copied
+    // otherwise report success with nothing copied. Decided after the read,
+    // so a failed or empty read reports that instead; getHistory, which
+    // judges its buffer first, reports INVALID_BUFFER_SIZE ahead of them.
     if ((capacity == 0) and (status == SbsStatus::OK)) {
         return SbsStatus::INVALID_BUFFER_SIZE;
     }

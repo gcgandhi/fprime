@@ -13,7 +13,7 @@
 
 ## Overview
 
-System services provide utility functions that support overall system operation: resource monitoring, version reporting, assertion handling, and general-purpose value databases. These components are typically present in every F Prime deployment but do not interact with each other as a subsystem — each provides an independent supporting function.
+System services provide utility functions that support overall system operation: resource monitoring, version reporting, assertion handling, and general-purpose value databases. Most of these components are present in every F Prime deployment, while the value databases are optional; they do not interact with each other as a subsystem — each provides an independent supporting function.
 
 ### System Resource Monitoring
 

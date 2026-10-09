@@ -5,6 +5,9 @@
 
 #include "StateBufferStoreTester.hpp"
 
+#include <cmath>
+#include <limits>
+
 #include "Fw/Types/SerialBuffer.hpp"
 
 namespace Svc {
@@ -99,7 +102,7 @@ bool sameTypeAndValue(const Fw::PolyType& lhs, const Fw::PolyType& rhs) {
 template <typename T>
 void checkTlmType(SbsTlmType::T type, T sample) {
     EXPECT_TRUE(sameTypeAndValue(storeTlmAs(type, sample), Fw::PolyType(sample)))
-        << "mapping type " << static_cast<int>(type);
+        << "mapping type " << static_cast<U32>(type);
 }
 
 //! Configure a fresh component with the given telemetry mappings
@@ -211,13 +214,14 @@ void StateBufferStoreTester::putWithValidityTest() {
 void StateBufferStoreTester::putRefusesStoreStatusTest() {
     // Statuses the store reports itself are not validities a writer may record
     const SbsStatus refused[] = {SbsStatus::UNINITIALIZED,       SbsStatus::NOT_WRITTEN, SbsStatus::NOT_FRESH,
-                                 SbsStatus::INVALID_BUFFER_SIZE, SbsStatus::INCOHERENT,  SbsStatus::WRONG_KIND};
+                                 SbsStatus::INVALID_BUFFER_SIZE, SbsStatus::INCOHERENT,  SbsStatus::WRONG_KIND,
+                                 SbsStatus::INVALID_VALIDITY};
     U8 stored[] = {'v'};
     Fw::Buffer in(stored, sizeof stored);
     for (const SbsStatus& validity : refused) {
         Fw::PolyType val(static_cast<U32>(1));
-        ASSERT_EQ(this->invoke_to_putValue(0, ENTRY_A, val, validity), SbsStatus::WRONG_KIND);
-        ASSERT_EQ(this->invoke_to_putData(0, ENTRY_B, in, validity), SbsStatus::WRONG_KIND);
+        ASSERT_EQ(this->invoke_to_putValue(0, ENTRY_A, val, validity), SbsStatus::INVALID_VALIDITY);
+        ASSERT_EQ(this->invoke_to_putData(0, ENTRY_B, in, validity), SbsStatus::INVALID_VALIDITY);
     }
 
     // Nothing was stored and neither entry was claimed, so either kind still fits
@@ -705,6 +709,36 @@ void StateBufferStoreTester::oversizedPutDataTest() {
     ASSERT_EQ(this->invoke_to_putData(0, ENTRY_A, in, SbsStatus::OK), SbsStatus::WRONG_KIND);
 }
 
+void StateBufferStoreTester::emptyBufferTest() {
+    // An exhausted BufferManager hands out Fw::Buffer(): null data, size zero
+    Fw::Buffer empty;
+    FwSizeType sizeOut = 1;
+
+    // Nothing to read yet, so nothing is lost
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 1, empty, sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(sizeOut, 0u);
+
+    // A null put stores nothing and claims nothing, so the entry still takes a value
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_A, empty, SbsStatus::OK), SbsStatus::INVALID_BUFFER_SIZE);
+    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(3)), 1);
+
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, empty, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 1, empty, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+
+    U8 stored[] = {'e'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_B, in, SbsStatus::OK), SbsStatus::OK);
+    Fw::Time measTime;
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_B, empty, measTime, Fw::Time(), sizeOut),
+              SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+}
+
 void StateBufferStoreTester::dataStatusTest() {
     U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
     Fw::Buffer out(readBack, sizeof readBack);
@@ -957,6 +991,29 @@ void StateBufferStoreTester::boolWatermarkTest() {
     ASSERT_EQ(max.get_time().getSeconds(), 2u);
 }
 
+void StateBufferStoreTester::nanWatermarkTest() {
+    // A NaN first value must not seed the watermarks: the finite values after it do
+    const F32 nan = std::numeric_limits<F32>::quiet_NaN();
+    this->put(ENTRY_A, Fw::PolyType(nan), 1);
+    this->put(ENTRY_A, Fw::PolyType(static_cast<F32>(3.0f)), 2);
+    this->put(ENTRY_A, Fw::PolyType(static_cast<F32>(1.0f)), 3);
+    // Nor does a later NaN disturb them
+    this->put(ENTRY_A, Fw::PolyType(nan), 4);
+
+    // It is still the latest value
+    ASSERT_TRUE(std::isnan(static_cast<F32>(this->get(ENTRY_A, SbsStatus::OK))));
+
+    SbsMeasurement min;
+    SbsMeasurement max;
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
+    Fw::PolyType minValue = min.get_value();
+    Fw::PolyType maxValue = max.get_value();
+    ASSERT_EQ(static_cast<F32>(minValue), 1.0f);
+    ASSERT_EQ(min.get_time().getSeconds(), 3u);
+    ASSERT_EQ(static_cast<F32>(maxValue), 3.0f);
+    ASSERT_EQ(max.get_time().getSeconds(), 2u);
+}
+
 void StateBufferStoreTester::dataEntryKindCheckedFirstTest() {
     U8 stored[] = {'d'};
     Fw::Buffer in(stored, sizeof stored);
@@ -967,13 +1024,6 @@ void StateBufferStoreTester::dataEntryKindCheckedFirstTest() {
     Fw::Buffer shortBuffer(tooSmall, sizeof tooSmall);
     FwSizeType sizeOut = 1;
     ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_B, shortBuffer, sizeOut), SbsStatus::WRONG_KIND);
-    ASSERT_EQ(sizeOut, 0u);
-
-    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
-    Fw::Buffer data(bytes, sizeof bytes);
-    sizeOut = 1;
-    const FwSizeType tooDeep = StateBufferStoreCfg::MAX_HISTORY_DEPTH + 1;
-    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_B, tooDeep, data, sizeOut), SbsStatus::WRONG_KIND);
     ASSERT_EQ(sizeOut, 0u);
 }
 

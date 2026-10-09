@@ -28,7 +28,8 @@ module Svc {
         # and writer are coordinated by a per-entry coherency counter rather
         # than a mutex, preserving the heritage design. The counter allows one
         # writer per entry; a telemetry-mapped entry refuses puts, so tlmIn is
-        # its only writer.
+        # its only writer port, and each mapped channel must reach tlmIn from
+        # one thread at a time.
         # ----------------------------------------------------------------------
 
         @ Port storing a primitive measurement

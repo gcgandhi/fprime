@@ -59,7 +59,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
         KIND_UNSET = 0,  //!< never stored to
         KIND_VALUE = 1,  //!< stored through putValue
         KIND_DATA = 2,   //!< stored through putData
-        KIND_TLM = 3,    //!< a value entry stored only through tlmIn, so it has a single writer
+        KIND_TLM = 3,    //!< a value entry stored only through tlmIn, its sole writer port
     };
 
     //! A stored measurement, as held internally
@@ -111,19 +111,21 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! An entry's watermarks, as copied by one read attempt
     struct WatermarkSnapshot {
-        bool clear = false;           //!< in: whether this read clears the watermarks
-        bool alreadyCleared = false;  //!< in: whether a clear was already pending before this read's
-        Measurement min;              //!< the minimum to report
-        Measurement max;              //!< the maximum to report
-        bool cleared = false;         //!< whether the watermarks read back as cleared
-        FwSizeType stored = 0;        //!< measurements stored
-        U8 kind = KIND_UNSET;         //!< the entry's kind
+        WatermarkSnapshot(bool clearIn, bool alreadyClearedIn) : clear(clearIn), alreadyCleared(alreadyClearedIn) {}
+        const bool clear;           //!< in: whether this read clears the watermarks
+        const bool alreadyCleared;  //!< in: whether a clear was already pending before this read's
+        Measurement min;            //!< the minimum to report
+        Measurement max;            //!< the maximum to report
+        bool cleared = false;       //!< whether the watermarks read back as cleared
+        FwSizeType stored = 0;      //!< measurements stored
+        U8 kind = KIND_UNSET;       //!< the entry's kind
         void copy(const Entry& block);
     };
 
     //! An entry's most recent measurements, serialized by one read attempt
     struct HistorySnapshot {
-        FwSizeType count = 0;  //!< in: how many measurements to serialize
+        explicit HistorySnapshot(FwSizeType countIn) : count(countIn) {}
+        const FwSizeType count;  //!< in: how many measurements to serialize
         //! the serialized records, held until the read proves coherent
         U8 records[StateBufferStoreCfg::MAX_HISTORY_DEPTH * SbsMeasurement::SERIALIZED_SIZE] = {};
         FwSizeType copied = 0;   //!< records serialized
@@ -243,7 +245,8 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Copy an entry into a snapshot, retrying torn copies
     //!
     //! Returns false, having emitted FailedReadCoherentData, when no attempt
-    //! within MAX_READ_ITERATIONS was coherent.
+    //! within MAX_READ_ITERATIONS was coherent. Defined in
+    //! StateBufferStore.cpp, so instantiable only there.
     template <typename Snapshot>
     bool coherentRead(Entry& block, StateBufferStore_ReadOperation operation, Snapshot& snapshot);
 
