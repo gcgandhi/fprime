@@ -341,6 +341,28 @@ TEST(OffNominal, TlmEntryRefusesValue) {
     tester.tlmEntryRefusesValueTest();
 }
 
+TEST(Nominal, TlmDataStore) {
+    COMMENT("Struct and string telemetry mapped as TYPE_DATA is stored as its serialized bytes");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmDataStoreTest();
+}
+
+TEST(OffNominal, TlmDataOversize) {
+    COMMENT("TYPE_DATA telemetry larger than MAX_DATA_SIZE is reported, not stored");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmDataOversizeTest();
+}
+
+TEST(OffNominal, TlmDataEntryRefuses) {
+    COMMENT("A TYPE_DATA entry refuses puts and value-side reads and commands");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-017");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmDataEntryRefusesTest();
+}
+
 TEST(Death, Unconfigured) {
     COMMENT("Using the component before configure() asserts");
     REQUIREMENT("REQ-STATEBUFFERSTORE-010");

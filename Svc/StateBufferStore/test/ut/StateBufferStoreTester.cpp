@@ -9,6 +9,7 @@
 #include <limits>
 
 #include "Fw/Types/SerialBuffer.hpp"
+#include "Fw/Types/String.hpp"
 
 namespace Svc {
 
@@ -38,9 +39,13 @@ constexpr StateBufferStoreCfg::StateEntry::T ENTRY_MAX_DEPTH = StateBufferStoreC
 constexpr FwChanIdType TLM_CHAN_U32 = 0x100;
 constexpr FwChanIdType TLM_CHAN_F32 = 0x101;
 constexpr FwChanIdType TLM_CHAN_BOOL = 0x102;
+constexpr FwChanIdType TLM_CHAN_STRUCT = 0x103;
+constexpr FwChanIdType TLM_CHAN_STRING = 0x104;
 constexpr FwChanIdType TLM_CHAN_UNMAPPED = 0x1FF;
 
 //! Entries the test telemetry channels are stored in
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_STRING = StateBufferStoreCfg::StateEntry::SBS_ENTRY_03;
+constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_STRUCT = StateBufferStoreCfg::StateEntry::SBS_ENTRY_04;
 constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_U32 = StateBufferStoreCfg::StateEntry::SBS_ENTRY_05;
 constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_F32 = StateBufferStoreCfg::StateEntry::SBS_ENTRY_06;
 constexpr StateBufferStoreCfg::StateEntry::T ENTRY_TLM_BOOL = StateBufferStoreCfg::StateEntry::SBS_ENTRY_07;
@@ -50,6 +55,8 @@ SbsTlmMapping TLM_MAPPINGS[] = {
     SbsTlmMapping(TLM_CHAN_U32, ENTRY_TLM_U32, SbsTlmType::TYPE_U32),
     SbsTlmMapping(TLM_CHAN_F32, ENTRY_TLM_F32, SbsTlmType::TYPE_F32),
     SbsTlmMapping(TLM_CHAN_BOOL, ENTRY_TLM_BOOL, SbsTlmType::TYPE_BOOL),
+    SbsTlmMapping(TLM_CHAN_STRUCT, ENTRY_TLM_STRUCT, SbsTlmType::TYPE_DATA),
+    SbsTlmMapping(TLM_CHAN_STRING, ENTRY_TLM_STRING, SbsTlmType::TYPE_DATA),
 };
 
 //! Read from a component that was never configured
@@ -1208,9 +1215,16 @@ void StateBufferStoreTester::tlmDecodeFailedTest() {
 void StateBufferStoreTester::throttleResetTest() {
     constexpr FwIndexType READ_THROTTLE = StateBufferStoreComponentBase::EVENTID_FAILEDREADCOHERENTDATA_THROTTLE;
     constexpr FwIndexType DECODE_THROTTLE = StateBufferStoreComponentBase::EVENTID_TLMDECODEFAILED_THROTTLE;
+    constexpr FwIndexType TOO_LARGE_THROTTLE = StateBufferStoreComponentBase::EVENTID_TLMDATATOOLARGE_THROTTLE;
     this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
     Fw::TlmBuffer narrow;
     ASSERT_EQ(narrow.serializeFrom(static_cast<U16>(1)), Fw::FW_SERIALIZE_OK);
+    // Only built when it fits a telemetry buffer; otherwise TlmDataTooLarge is unreachable
+    const bool canOversize = StateBufferStoreCfg::MAX_DATA_SIZE < FW_TLM_BUFFER_MAX_SIZE;
+    Fw::TlmBuffer oversized;
+    for (FwSizeType i = 0; canOversize and (i <= StateBufferStoreCfg::MAX_DATA_SIZE); i++) {
+        ASSERT_EQ(oversized.serializeFrom(static_cast<U8>(0)), Fw::FW_SERIALIZE_OK);
+    }
     Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
     this->clearHistory();
 
@@ -1224,8 +1238,12 @@ void StateBufferStoreTester::throttleResetTest() {
     for (FwIndexType i = 0; i <= DECODE_THROTTLE; i++) {
         this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, narrow);
     }
+    for (FwIndexType i = 0; canOversize and (i <= TOO_LARGE_THROTTLE); i++) {
+        this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, oversized);
+    }
     ASSERT_EVENTS_FailedReadCoherentData_SIZE(READ_THROTTLE);
     ASSERT_EVENTS_TlmDecodeFailed_SIZE(DECODE_THROTTLE);
+    ASSERT_EVENTS_TlmDataTooLarge_SIZE(canOversize ? TOO_LARGE_THROTTLE : 0);
     (void)this->get(ENTRY_TLM_U32, SbsStatus::NOT_WRITTEN);
 
     this->clearHistory();
@@ -1240,8 +1258,12 @@ void StateBufferStoreTester::throttleResetTest() {
     this->component.m_utForceTornReads = StateBufferStoreCfg::MAX_READ_ITERATIONS;
     ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_A, val, measTime, Fw::Time()), SbsStatus::INCOHERENT);
     this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, narrow);
+    if (canOversize) {
+        this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, oversized);
+    }
     ASSERT_EVENTS_FailedReadCoherentData_SIZE(1);
     ASSERT_EVENTS_TlmDecodeFailed_SIZE(1);
+    ASSERT_EVENTS_TlmDataTooLarge_SIZE(canOversize ? 1 : 0);
 }
 
 void StateBufferStoreTester::tlmEntryRefusesDataTest() {
@@ -1263,6 +1285,123 @@ void StateBufferStoreTester::tlmEntryRefusesValueTest() {
     FwSizeType sizeOut = 1;
     ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_U32, out, measTime, Fw::Time(), sizeOut), SbsStatus::WRONG_KIND);
     ASSERT_EQ(sizeOut, 0u);
+}
+
+void StateBufferStoreTester::tlmDataStoreTest() {
+    this->setTestTime(Fw::Time(TimeBase::TB_WORKSTATION_TIME, 5, 0));
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+
+    // Any FPP struct serves; SbsMeasurement is one this module already defines
+    const SbsMeasurement sent(Fw::Time(TimeBase::TB_WORKSTATION_TIME, 3, 4), SbsStatus::INVALID,
+                              Fw::PolyType(static_cast<I16>(-7)));
+    Fw::TlmBuffer structValue;
+    ASSERT_EQ(structValue.serializeFrom(sent), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, structValue);
+
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    Fw::Time measTime;
+    FwSizeType sizeOut = 0;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRUCT, out, measTime, Fw::Time(), sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, structValue.getSize());
+    ASSERT_EQ(measTime.getSeconds(), 70u);
+
+    // The stored bytes are the channel's serialization, decoded by its own type
+    Fw::SerialBuffer reader(readBack, sizeOut);
+    reader.fill();
+    SbsMeasurement received;
+    ASSERT_EQ(reader.deserializeTo(received), Fw::FW_SERIALIZE_OK);
+    ASSERT_EQ(received.get_time(), sent.get_time());
+    ASSERT_EQ(received.get_validity(), SbsStatus::INVALID);
+    ASSERT_TRUE(received.get_value().isI16());
+    ASSERT_EQ(static_cast<I16>(received.get_value()), -7);
+
+    const Fw::String sentString("state");
+    Fw::TlmBuffer stringValue;
+    ASSERT_EQ(stringValue.serializeFrom(sentString), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_STRING, tag, stringValue);
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRING, out, measTime, Fw::Time(), sizeOut), SbsStatus::OK);
+    Fw::SerialBuffer stringReader(readBack, sizeOut);
+    stringReader.fill();
+    Fw::String receivedString;
+    ASSERT_EQ(stringReader.deserializeTo(receivedString), Fw::FW_SERIALIZE_OK);
+    ASSERT_EQ(receivedString, sentString);
+
+    ASSERT_EVENTS_SIZE(0);
+}
+
+void StateBufferStoreTester::tlmDataOversizeTest() {
+    if (StateBufferStoreCfg::MAX_DATA_SIZE >= FW_TLM_BUFFER_MAX_SIZE) {
+        GTEST_SKIP() << "MAX_DATA_SIZE holds any telemetry buffer, so no TYPE_DATA value can be oversized";
+    }
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer largest;
+    for (FwSizeType i = 0; i < StateBufferStoreCfg::MAX_DATA_SIZE; i++) {
+        ASSERT_EQ(largest.serializeFrom(static_cast<U8>(i)), Fw::FW_SERIALIZE_OK);
+    }
+    Fw::TlmBuffer oversized = largest;
+    ASSERT_EQ(oversized.serializeFrom(static_cast<U8>(0)), Fw::FW_SERIALIZE_OK);
+
+    this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, oversized);
+    ASSERT_EVENTS_SIZE(1);
+    ASSERT_EVENTS_TlmDataTooLarge_SIZE(1);
+    ASSERT_EVENTS_TlmDataTooLarge(0, TLM_CHAN_STRUCT, ENTRY_TLM_STRUCT, StateBufferStoreCfg::MAX_DATA_SIZE + 1,
+                                  StateBufferStoreCfg::MAX_DATA_SIZE);
+
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    Fw::Time measTime;
+    FwSizeType sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRUCT, out, measTime, Fw::Time(), sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(sizeOut, 0u);
+
+    // Exactly MAX_DATA_SIZE fits
+    this->clearHistory();
+    this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, largest);
+    ASSERT_EVENTS_SIZE(0);
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRUCT, out, measTime, Fw::Time(), sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, StateBufferStoreCfg::MAX_DATA_SIZE);
+    ASSERT_EQ(readBack[StateBufferStoreCfg::MAX_DATA_SIZE - 1],
+              static_cast<U8>(StateBufferStoreCfg::MAX_DATA_SIZE - 1));
+}
+
+void StateBufferStoreTester::tlmDataEntryRefusesTest() {
+    // Refused as a telemetry entry even with a null buffer, before any telemetry arrives
+    Fw::Buffer empty;
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_TLM_STRUCT, empty, SbsStatus::OK), SbsStatus::WRONG_KIND);
+    U8 stored[] = {'t', 'l', 'm'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_TLM_STRUCT, in, SbsStatus::OK), SbsStatus::WRONG_KIND);
+    Fw::PolyType val(static_cast<U32>(9));
+    ASSERT_EQ(this->invoke_to_putValue(0, ENTRY_TLM_STRUCT, val, SbsStatus::OK), SbsStatus::WRONG_KIND);
+
+    // A TYPE_DATA entry is a data entry to readers
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    Fw::Time measTime;
+    FwSizeType sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRUCT, out, measTime, Fw::Time(), sizeOut), SbsStatus::NOT_WRITTEN);
+    (void)this->get(ENTRY_TLM_STRUCT, SbsStatus::WRONG_KIND);
+    SbsMeasurement min;
+    SbsMeasurement max;
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_TLM_STRUCT, min, max), SbsStatus::WRONG_KIND);
+    ASSERT_EQ(this->invoke_to_clearMinMax(0, ENTRY_TLM_STRUCT), SbsStatus::WRONG_KIND);
+    ASSERT_EQ(this->invoke_to_clearAndGetMinMax(0, ENTRY_TLM_STRUCT, min, max), SbsStatus::WRONG_KIND);
+    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
+    Fw::Buffer data(bytes, sizeof bytes);
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_TLM_STRUCT, data, sizeOut), SbsStatus::WRONG_KIND);
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_TLM_STRUCT, 0, data, sizeOut), SbsStatus::WRONG_KIND);
+
+    const U32 reportSeq = this->m_cmdSeq++;
+    this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, reportSeq, ENTRY_TLM_STRUCT);
+    const U32 clearSeq = this->m_cmdSeq++;
+    this->sendCmd_CLEAR_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, clearSeq, ENTRY_TLM_STRUCT);
+    ASSERT_EVENTS_SIZE(2);
+    ASSERT_EVENTS_ReportWatermarksRejected(0, ENTRY_TLM_STRUCT, StateBufferStore_WatermarkRejection::DATA_ENTRY);
+    ASSERT_EVENTS_ClearWatermarksRejected(0, ENTRY_TLM_STRUCT, StateBufferStore_WatermarkRejection::DATA_ENTRY);
+    ASSERT_CMD_RESPONSE_SIZE(2);
+    ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, reportSeq, Fw::CmdResponse::EXECUTION_ERROR);
+    ASSERT_CMD_RESPONSE(1, StateBufferStore::OPCODE_CLEAR_WATERMARKS, clearSeq, Fw::CmdResponse::EXECUTION_ERROR);
 }
 
 // ----------------------------------------------------------------------

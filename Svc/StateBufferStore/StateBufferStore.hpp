@@ -1,5 +1,6 @@
 // ======================================================================
 // \title  StateBufferStore.hpp
+// \author Gorang Gandhi
 // \brief  hpp file for StateBufferStore component implementation class
 // ======================================================================
 
@@ -56,18 +57,22 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Which interface an entry is used through, fixed by its first store or,
     //! for a telemetry-mapped entry, by configure()
     enum EntryKind : U8 {
-        KIND_UNSET = 0,  //!< never stored to
-        KIND_VALUE = 1,  //!< stored through putValue
-        KIND_DATA = 2,   //!< stored through putData
-        KIND_TLM = 3,    //!< a value entry stored only through tlmIn, its sole writer port
+        KIND_UNSET = 0,     //!< never stored to
+        KIND_VALUE = 1,     //!< stored through putValue
+        KIND_DATA = 2,      //!< stored through putData
+        KIND_TLM = 3,       //!< a value entry stored only through tlmIn, its sole writer port
+        KIND_TLM_DATA = 4,  //!< a data entry stored only through tlmIn, its sole writer port
     };
 
     //! A stored measurement, as held internally
     struct Measurement {
-        Fw::Time time;                                //!< when the value was written
-        Fw::PolyType value;                           //!< the value, for value entries
+        Fw::Time time;      //!< when the value was written
+        Fw::PolyType value;  //!< the primitive value, set by putValue (KIND_VALUE/KIND_TLM);
+                             //!< left default (TYPE_NOTYPE) for data entries, whose payload
+                             //!< lives in the paired Entry::data slot instead
         SbsStatus validity = SbsStatus::NOT_WRITTEN;  //!< validity recorded by the writer
-        FwSizeType dataSize = 0;                      //!< bytes used in the payload slot, for data entries
+        FwSizeType dataSize = 0;  //!< bytes used in the paired Entry::data slot, set by putData
+                                  //!< (KIND_DATA/KIND_TLM_DATA); 0 for value entries
     };
 
     //! Per-entry control block
@@ -77,14 +82,19 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! readers without a lock, and is valid to a reader only if the
     //! coherency counter was even and unchanged across its copy.
     struct Entry {
-        Measurement* history;               //!< ring of depth measurements
-        U8* data;                           //!< depth payload slots of MAX_DATA_SIZE bytes
+        Measurement* history;  //!< ring of depth measurements; history[slotIndex] is that slot's
+                                //!< time/value/validity/dataSize, set by putValue/putData
+        U8* data;               //!< depth payload slots of MAX_DATA_SIZE bytes; data[slotIndex] is the
+                                 //!< payload backing history[slotIndex], written/read by putData/getData
         std::atomic<U32> coherencyCounter;  //!< odd while a write is in progress
         std::atomic<U8> kind;               //!< EntryKind, claimed by the first store or by configure()
         std::atomic<bool> clearPending;     //!< when set, the next put starts new watermarks
         FwSizeType depth;                   //!< configured history depth
         FwSizeType latest;                  //!< index of the most recent measurement
-        FwSizeType stored;                  //!< measurements stored, saturating at depth
+        FwSizeType stored;  //!< count of slots actually written since the last clear, saturating
+                            //!< at depth once the ring has wrapped; distinguishes an unfilled
+                            //!< ring (stale/default slots beyond stored) from a full one, and
+                            //!< bounds how far history reads may walk back from latest
         Measurement min;                    //!< minimum value recorded
         Measurement max;                    //!< maximum value recorded
         Measurement retiredMin;             //!< minimum displaced by the most recent clear
@@ -93,14 +103,21 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     };
 
     //! An entry's latest measurement, as copied by one read attempt
+    //!
+    //! Used by getValue: copy() takes a plain-struct snapshot of just the
+    //! fields getValue needs (no history ring, no payload), which coherentRead
+    //! retries under the coherency counter until it proves the copy wasn't
+    //! torn by a concurrent write.
     struct ValueSnapshot {
-        Measurement measurement;  //!< the latest measurement
-        FwSizeType stored = 0;    //!< measurements stored
-        U8 kind = KIND_UNSET;     //!< the entry's kind
+        Measurement measurement;  //!< history[latest] at copy time
+        FwSizeType stored = 0;    //!< block.stored at copy time; OK vs NOT_WRITTEN hinges on this
+        U8 kind = KIND_UNSET;     //!< block.kind at copy time; rejects data-kind entries
         void copy(const Entry& block);
     };
 
     //! An entry's latest measurement and payload, as copied by one read attempt
+    //!
+    //! Serves similar purpose as ValueSnapshot, but for data-kind entries
     struct DataSnapshot {
         Measurement measurement;                              //!< the latest measurement
         U8 payload[StateBufferStoreCfg::MAX_DATA_SIZE] = {};  //!< its payload bytes
@@ -227,6 +244,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Returns true when the entry is, or has just become, of the given kind.
     static bool claimKind(Entry& block, EntryKind kind);
 
+    //! Whether a store of the given kind may claim an entry currently of kind current
+    static bool mayClaim(U8 current, EntryKind kind);
+
     //! Mark an entry as being written, making its counter odd
     static void beginWrite(Entry& block);
 
@@ -237,9 +257,13 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //!
     //! Not static so that unit tests can force a torn read: nothing in a
     //! single-threaded test can interleave a write. See docs/sdd.md.
-    U32 beginRead(Entry& block);
+    U32 beginRead(const Entry& block);
 
-    //! Report whether the read attempt begun with before saw a coherent entry
+    //! Resample the coherency counter at the end of a read attempt
+    //!
+    //! Returns true if the copy is coherent: before (the value beginRead
+    //! returned) is even, so no write was in progress when the copy started,
+    //! and the counter still equals it, so no write started during the copy.
     static bool endRead(const Entry& block, U32 before);
 
     //! Copy an entry into a snapshot, retrying torn copies
@@ -248,10 +272,13 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! within MAX_READ_ITERATIONS was coherent. Defined in
     //! StateBufferStore.cpp, so instantiable only there.
     template <typename Snapshot>
-    bool coherentRead(Entry& block, StateBufferStore_ReadOperation operation, Snapshot& snapshot);
+    bool coherentRead(const Entry& block, StateBufferStore_ReadOperation operation, Snapshot& snapshot);
 
     //! Whether an entry kind holds primitive values
     static bool isValueKind(U8 kind);
+
+    //! Whether an entry kind holds string, struct, or byte-array data
+    static bool isDataKind(U8 kind);
 
     //! Whether a writer may record a validity: only OK and INVALID
     static bool isWriterValidity(const SbsStatus& validity);
@@ -272,6 +299,15 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Store a value in a value entry, as one write
     static void storeValue(Entry& block, const Fw::PolyType& val, const Fw::Time& time, const SbsStatus& validity);
+
+    //! Store data in a data entry, as one write
+    //!
+    //! size must not exceed MAX_DATA_SIZE.
+    static void storeData(Entry& block,
+                          const U8* bytes,
+                          FwSizeType size,
+                          const Fw::Time& time,
+                          const SbsStatus& validity);
 
     //! Decode a serialized telemetry value as the given type
     //!
@@ -323,7 +359,7 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Per-entry control blocks
     Entry m_entries[Svc::StateBufferStoreCfg::StateEntry::NUM_ENTRIES];
 
-    //! Base of the single history allocation
+    //! Base of the single history memory allocation
     void* m_memPtr;
 
     //! Size of the history allocation, as actually provided

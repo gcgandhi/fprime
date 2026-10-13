@@ -1,5 +1,6 @@
 // ======================================================================
 // \title  StateBufferStore.cpp
+// \author Gorang Gandhi
 // \brief  cpp file for StateBufferStore component implementation class
 // ======================================================================
 
@@ -209,7 +210,8 @@ void StateBufferStore::configure(FwEnumStoreType memId,
     // entry's only writer port, which the coherency counter requires (the
     // channel's producer must also emit it from one thread at a time)
     for (FwSizeType i = 0; i < tlmMappings.getSize(); i++) {
-        this->m_entries[static_cast<FwSizeType>(tlmMappings[i].get_entry())].kind.store(KIND_TLM,
+        const EntryKind kind = (tlmMappings[i].get_valueType() == SbsTlmType::TYPE_DATA) ? KIND_TLM_DATA : KIND_TLM;
+        this->m_entries[static_cast<FwSizeType>(tlmMappings[i].get_entry())].kind.store(kind,
                                                                                         std::memory_order_relaxed);
     }
     this->m_tlmMappings = tlmMappings;
@@ -241,6 +243,10 @@ bool StateBufferStore::claimKind(Entry& block, EntryKind kind) {
     return current == static_cast<U8>(kind);
 }
 
+bool StateBufferStore::mayClaim(U8 current, EntryKind kind) {
+    return (current == KIND_UNSET) or (current == static_cast<U8>(kind));
+}
+
 void StateBufferStore::beginWrite(Entry& block) {
     (void)block.coherencyCounter.fetch_add(1, std::memory_order_relaxed);
     // Keeps the write's stores from becoming visible before the odd count
@@ -251,7 +257,7 @@ void StateBufferStore::endWrite(Entry& block) {
     (void)block.coherencyCounter.fetch_add(1, std::memory_order_release);
 }
 
-U32 StateBufferStore::beginRead(Entry& block) {
+U32 StateBufferStore::beginRead(const Entry& block) {
 #ifdef BUILD_UT
     if (this->m_utBeforeRead != nullptr) {
         void (*const hook)(void* context) = this->m_utBeforeRead;
@@ -278,7 +284,9 @@ bool StateBufferStore::endRead(const Entry& block, U32 before) {
 }
 
 template <typename Snapshot>
-bool StateBufferStore::coherentRead(Entry& block, StateBufferStore_ReadOperation operation, Snapshot& snapshot) {
+bool StateBufferStore::coherentRead(const Entry& block,
+                                    StateBufferStore_ReadOperation operation,
+                                    Snapshot& snapshot) {
     for (U32 iteration = 0; iteration < StateBufferStoreCfg::MAX_READ_ITERATIONS; iteration++) {
         const U32 before = this->beginRead(block);
         snapshot.copy(block);
@@ -388,6 +396,10 @@ bool StateBufferStore::isValueKind(U8 kind) {
     return (kind == KIND_VALUE) or (kind == KIND_TLM);
 }
 
+bool StateBufferStore::isDataKind(U8 kind) {
+    return (kind == KIND_DATA) or (kind == KIND_TLM_DATA);
+}
+
 bool StateBufferStore::lessThan(const Fw::PolyType& lhs, const Fw::PolyType& rhs) {
     // Fw::PolyType::operator< is false for every pair of bools, which would
     // freeze a bool entry's watermarks at their seed
@@ -398,7 +410,7 @@ bool StateBufferStore::lessThan(const Fw::PolyType& lhs, const Fw::PolyType& rhs
 }
 
 SbsStatus StateBufferStore::clearWatermarks(Entry& block) {
-    if (block.kind.load(std::memory_order_acquire) == KIND_DATA) {
+    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
         return SbsStatus::WRONG_KIND;
     }
     block.clearPending.store(true, std::memory_order_release);
@@ -416,6 +428,21 @@ void StateBufferStore::storeValue(Entry& block,
     block.history[slotIndex].validity = validity;
     block.history[slotIndex].dataSize = 0;
     StateBufferStore::updateWatermarks(block, val, time, validity);
+    StateBufferStore::endWrite(block);
+}
+
+void StateBufferStore::storeData(Entry& block,
+                                 const U8* bytes,
+                                 FwSizeType size,
+                                 const Fw::Time& time,
+                                 const SbsStatus& validity) {
+    FW_ASSERT(size <= StateBufferStoreCfg::MAX_DATA_SIZE, static_cast<FwAssertArgType>(size));
+    StateBufferStore::beginWrite(block);
+    const FwSizeType slotIndex = StateBufferStore::appendSlot(block);
+    (void)::memcpy(&block.data[slotIndex * StateBufferStoreCfg::MAX_DATA_SIZE], bytes, size);
+    block.history[slotIndex].time = time;
+    block.history[slotIndex].validity = validity;
+    block.history[slotIndex].dataSize = size;
     StateBufferStore::endWrite(block);
 }
 
@@ -459,7 +486,8 @@ Fw::SerializeStatus StateBufferStore::decodeTlm(const SbsTlmType& type, Fw::TlmB
             status = decodeAs<bool>(reader, out);
             break;
         default:
-            // The generated enum asserts on construction from an undefined value
+            // TYPE_DATA is never decoded, and the generated enum asserts on
+            // construction from an undefined value
             FW_ASSERT(0, static_cast<FwAssertArgType>(type.e));
             break;
     }
@@ -510,7 +538,7 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
                                            SbsMeasurement& max) {
     const bool clear = (operation == StateBufferStore_ReadOperation::CLEAR_AND_GET_MIN_MAX);
     // Kinds are never unclaimed, so a refused clear can be decided up front
-    if (block.kind.load(std::memory_order_acquire) == KIND_DATA) {
+    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
         return SbsStatus::WRONG_KIND;
     }
     // A clear that finds one already pending ends an epoch with no puts in it
@@ -529,7 +557,7 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
         }
         return SbsStatus::INCOHERENT;
     }
-    if (snapshot.kind == KIND_DATA) {
+    if (StateBufferStore::isDataKind(snapshot.kind)) {
         return SbsStatus::WRONG_KIND;
     }
     reportWatermark(snapshot.min, snapshot.cleared, min);
@@ -607,7 +635,7 @@ SbsStatus StateBufferStore::readHistory(Entry& block,
     if (not this->coherentRead(block, operation, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
-    if (snapshot.kind == KIND_DATA) {
+    if (StateBufferStore::isDataKind(snapshot.kind)) {
         return SbsStatus::WRONG_KIND;
     }
     FW_ASSERT(snapshot.serialized);
@@ -657,7 +685,7 @@ SbsStatus StateBufferStore::getValue_handler(FwIndexType portNum,
     if (not this->coherentRead(block, StateBufferStore_ReadOperation::GET_VALUE, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
-    if (snapshot.kind == KIND_DATA) {
+    if (StateBufferStore::isDataKind(snapshot.kind)) {
         return SbsStatus::WRONG_KIND;
     }
     val = snapshot.measurement.value;
@@ -675,9 +703,9 @@ SbsStatus StateBufferStore::putData_handler(FwIndexType portNum,
     if (not StateBufferStore::isWriterValidity(validity)) {
         return SbsStatus::INVALID_VALIDITY;
     }
-    // A value entry is refused as such before its payload is judged, and an
-    // oversized payload is refused before it can claim an unset entry
-    if (StateBufferStore::isValueKind(block.kind.load(std::memory_order_acquire))) {
+    // A value or telemetry entry is refused as such before its payload is
+    // judged, and an oversized payload is refused before it can claim an unset entry
+    if (not StateBufferStore::mayClaim(block.kind.load(std::memory_order_acquire), KIND_DATA)) {
         return SbsStatus::WRONG_KIND;
     }
     // A null buffer, such as an exhausted BufferManager returns, holds nothing to store
@@ -687,14 +715,7 @@ SbsStatus StateBufferStore::putData_handler(FwIndexType portNum,
     if (not StateBufferStore::claimKind(block, KIND_DATA)) {
         return SbsStatus::WRONG_KIND;
     }
-
-    StateBufferStore::beginWrite(block);
-    const FwSizeType slotIndex = StateBufferStore::appendSlot(block);
-    (void)::memcpy(&block.data[slotIndex * StateBufferStoreCfg::MAX_DATA_SIZE], data.getData(), size);
-    block.history[slotIndex].time = now;
-    block.history[slotIndex].validity = validity;
-    block.history[slotIndex].dataSize = size;
-    StateBufferStore::endWrite(block);
+    StateBufferStore::storeData(block, data.getData(), size, now, validity);
     return SbsStatus::OK;
 }
 
@@ -755,7 +776,7 @@ SbsStatus StateBufferStore::getHistory_handler(FwIndexType portNum,
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
     // Kinds are never unclaimed, so a data entry is refused before its buffer is judged
-    if (block.kind.load(std::memory_order_acquire) == KIND_DATA) {
+    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
         return SbsStatus::WRONG_KIND;
     }
     const FwSizeType required = block.depth * HISTORY_RECORD_SIZE;
@@ -775,7 +796,7 @@ SbsStatus StateBufferStore::getNHistory_handler(FwIndexType portNum,
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
     // Kinds are never unclaimed, so a data entry is refused before its request is judged
-    if (block.kind.load(std::memory_order_acquire) == KIND_DATA) {
+    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
         return SbsStatus::WRONG_KIND;
     }
 
@@ -809,13 +830,26 @@ void StateBufferStore::tlmIn_handler(FwIndexType portNum, FwChanIdType id, Fw::T
     for (FwSizeType i = 0; i < this->m_tlmMappings.getSize(); i++) {
         const SbsTlmMapping& mapping = this->m_tlmMappings[i];
         if (mapping.get_chanId() == id) {
+            Entry& block = this->checkedEntry(mapping.get_entry());
+            // configure() fixed the kind from the mapping, so it alone decides the path
+            const U8 kind = block.kind.load(std::memory_order_relaxed);
+            if (kind == KIND_TLM_DATA) {
+                if (val.getSize() > StateBufferStoreCfg::MAX_DATA_SIZE) {
+                    this->log_WARNING_HI_TlmDataTooLarge(id, mapping.get_entry(), val.getSize(),
+                                                         StateBufferStoreCfg::MAX_DATA_SIZE);
+                    return;
+                }
+                // Telemetry carries its own time tag, which is when the value was sampled
+                StateBufferStore::storeData(block, val.getBuffAddr(), val.getSize(), timeTag, SbsStatus::OK);
+                return;
+            }
+            FW_ASSERT(kind == KIND_TLM, static_cast<FwAssertArgType>(kind));
             Fw::PolyType value;
             if (StateBufferStore::decodeTlm(mapping.get_valueType(), val, value) != Fw::FW_SERIALIZE_OK) {
                 this->log_WARNING_HI_TlmDecodeFailed(id, mapping.get_entry(), mapping.get_valueType(), val.getSize());
                 return;
             }
-            // Telemetry carries its own time tag, which is when the value was sampled
-            StateBufferStore::storeValue(this->checkedEntry(mapping.get_entry()), value, timeTag, SbsStatus::OK);
+            StateBufferStore::storeValue(block, value, timeTag, SbsStatus::OK);
             return;
         }
     }
@@ -876,6 +910,7 @@ void StateBufferStore::CLEAR_WATERMARKS_cmdHandler(FwOpcodeType opCode,
 void StateBufferStore::RESET_THROTTLES_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     this->log_WARNING_HI_FailedReadCoherentData_ThrottleClear();
     this->log_WARNING_HI_TlmDecodeFailed_ThrottleClear();
+    this->log_WARNING_HI_TlmDataTooLarge_ThrottleClear();
     this->log_ACTIVITY_HI_ThrottlesReset();
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }

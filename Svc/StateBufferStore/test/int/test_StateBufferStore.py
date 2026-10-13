@@ -10,11 +10,13 @@ int_config.json (see docs/user-manual/gds/reusable-integration-tests.md):
 
     "Svc.StateBufferStore": "<instance mnemonic>",
     "Svc.StateBufferStore.quietEntry": "<value entry nothing writes during the test>",
-    "Svc.StateBufferStore.dataEntry": "<entry already stored through putData before the tests run>"
+    "Svc.StateBufferStore.dataEntry": "<entry already stored through putData before the tests run>",
+    "Svc.StateBufferStore.tlmDataEntry": "<entry the deployment maps to a telemetry channel as TYPE_DATA>"
 
-Tests that need quietEntry or dataEntry are skipped when it is not mapped. An
-entry's kind is fixed by its first store, so dataEntry must have been written
-through putData before these tests run, or the watermark commands accept it.
+Tests that need quietEntry, dataEntry, or tlmDataEntry are skipped when it is
+not mapped. An entry's kind is fixed by its first store, so dataEntry must have
+been written through putData before these tests run, or the watermark commands
+accept it. tlmDataEntry needs no prior store: configure() fixes its kind.
 """
 
 import pytest
@@ -22,6 +24,7 @@ import pytest
 COMPONENT = "Svc.StateBufferStore"
 QUIET_ENTRY_KEY = COMPONENT + ".quietEntry"
 DATA_ENTRY_KEY = COMPONENT + ".dataEntry"
+TLM_DATA_ENTRY_KEY = COMPONENT + ".tlmDataEntry"
 NOT_AN_ENTRY = "NUM_ENTRIES"
 # Seconds to wait for each command's events over the GDS link
 TIMEOUT = 5
@@ -143,6 +146,7 @@ def test_not_an_entry_rejected(fprime_test_api, command_name, rejected_event):
     )
 
 
+@pytest.mark.parametrize("entry_key", [DATA_ENTRY_KEY, TLM_DATA_ENTRY_KEY])
 @pytest.mark.parametrize(
     "command_name, rejected_event",
     [
@@ -150,14 +154,17 @@ def test_not_an_entry_rejected(fprime_test_api, command_name, rejected_event):
         ("CLEAR_WATERMARKS", "ClearWatermarksRejected"),
     ],
 )
-def test_data_entry_rejected(fprime_test_api, command_name, rejected_event):
+def test_data_entry_rejected(fprime_test_api, entry_key, command_name, rejected_event):
     """A data entry has no watermarks, so watermark commands fail with EXECUTION_ERROR
 
-    Covers: REQ-STATEBUFFERSTORE-016
+    Run for an entry stored through putData and for one mapped to telemetry as
+    TYPE_DATA.
+
+    Covers: REQ-STATEBUFFERSTORE-016, REQ-STATEBUFFERSTORE-017
     """
-    entry = _config_value(fprime_test_api, DATA_ENTRY_KEY)
+    entry = _config_value(fprime_test_api, entry_key)
     if entry is None:
-        pytest.skip(DATA_ENTRY_KEY + " is not mapped in the deployment configuration")
+        pytest.skip(entry_key + " is not mapped in the deployment configuration")
 
     sbs = _sbs(fprime_test_api)
     command = sbs + "." + command_name

@@ -191,6 +191,15 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A telemetry-mapped entry refuses value puts and data reads
     void tlmEntryRefusesValueTest();
 
+    //! Struct and string telemetry mapped as TYPE_DATA is stored as its serialized bytes
+    void tlmDataStoreTest();
+
+    //! TYPE_DATA telemetry larger than MAX_DATA_SIZE is reported, not stored
+    void tlmDataOversizeTest();
+
+    //! A TYPE_DATA entry refuses puts and value-side reads and commands
+    void tlmDataEntryRefusesTest();
+
     //! Using the component before configure() asserts
     void unconfiguredDeathTest();
 

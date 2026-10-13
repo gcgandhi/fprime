@@ -22,7 +22,9 @@ depth is set independently. Values are carried as `Fw::PolyType`, so a single
 set of ports serves all supported primitive types; strings, structures, and
 byte arrays use a parallel `Fw::Buffer` interface. Each entry is used through
 exactly one of the two interfaces, fixed by its first store or, for an entry
-mapped to a telemetry channel, by `configure()`.
+mapped to a telemetry channel, by `configure()`. Telemetry channels of any
+type can be stored: primitive and enum channels as values, struct, string,
+and array channels as data.
 
 ## 2. Requirements
 
@@ -46,8 +48,8 @@ derives from in the heritage module's specification.
 | REQ-STATEBUFFERSTORE-013 | derived | `Svc::StateBufferStore` shall report `NOT_WRITTEN` for an entry never stored to, and `NOT_FRESH` when the measurement has not changed since the caller's previous read; a caller supplying no previous read time (`Fw::ZERO_TIME`) shall not be checked for freshness. | Unit Test |
 | REQ-STATEBUFFERSTORE-014 | derived (#5067) | `Svc::StateBufferStore` shall detect a measurement, watermark, or history read concurrently with a write, retry the read up to a configured number of attempts, and on exhaustion emit a warning-high event identifying the read, throttled per §3.11, and report `INCOHERENT` without copying out the read data. | Unit Test |
 | REQ-STATEBUFFERSTORE-015 | derived | `Svc::StateBufferStore` shall perform every store and read operation without dynamic memory allocation after configuration and in bounded time. | Inspection |
-| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, or as a value entry written only through `tlmIn` when `configure()` maps a telemetry channel to it, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it and for any put to a telemetry-mapped entry. | Unit Test |
-| REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, throttled per §3.11, storing nothing, when a mapped value does not decode as its type. | Unit Test |
+| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, or as a value or data entry written only through `tlmIn` when `configure()` maps a telemetry channel to it, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it and for any put to a telemetry-mapped entry. | Unit Test |
+| REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type or, for a channel mapped as serialized data, as its serialized bytes, and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, throttled per §3.11, storing nothing, when a mapped value does not decode as its type or serialized data exceeds the configured maximum data size. | Unit Test |
 | REQ-STATEBUFFERSTORE-018 | derived | `Svc::StateBufferStore` shall provide a command that resets the throttles of its throttled warning events, so that a throttled warning is reported again when its condition recurs. | Unit Test |
 | REQ-STATEBUFFERSTORE-019 | derived | `Svc::StateBufferStore` shall reject a watermark command whose entry argument names no entry with `VALIDATION_ERROR`, reporting the rejection as an event. | Unit Test |
 
@@ -101,6 +103,12 @@ scratch copy on the reader's stack and hands it to the caller only once the read
 proves coherent. One `coherentRead` helper, templated on a per-read snapshot
 type, runs every read's attempt loop. Templates here follow CPP-7
 (`.github/skills/fprime-cpp-design/SKILL.md`): single-parameter helpers only.
+It is instantiated once per snapshot type, four in all, and each instance holds
+only the retry loop: `beginRead`, `endRead`, and the event call are ordinary
+functions, and each `copy()` would exist without the template. A virtual
+`copy()` on a common snapshot base, or a function pointer with a `void*`
+context, would leave one loop but add an indirect call to every attempt, and
+the function pointer would also lose type checking, so the template is kept.
 
 The counter admits one writer per entry. A telemetry-mapped entry refuses
 puts, so `tlmIn` is its only writer port; that its channel is sent to `tlmIn`
@@ -219,8 +227,9 @@ Three heritage behaviors were deliberately changed:
   would end the software on the event, leaving `INCOHERENT` unreachable.
 - **Entry kinds are refused, not asserted.** The heritage `put` asserted that a
   value matched its entry's configured type. Here an entry is fixed as a value
-  or data entry by its first store, or as a value entry by `configure()` when
-  a telemetry channel is mapped to it, and every operation of the other kind —
+  or data entry by its first store, or by `configure()` when a telemetry
+  channel is mapped to it (a data entry for `TYPE_DATA`, otherwise a value
+  entry), and every operation of the other kind —
   including the puts, which therefore return `SbsStatus` — reports `WRONG_KIND`
   and changes nothing. Watermarks and history are value-entry operations; a data
   entry's history is kept for coherency but is not readable. A
@@ -268,14 +277,26 @@ the deployment's channels (§7); until then it is written by hand, which is why
 it belongs to the deployment rather than to `StateBufferStoreCfg.fpp`: channel
 IDs are assigned per deployment.
 
-A received channel found in the table is decoded into an `Fw::PolyType` of its
-mapped type and stored exactly as `putValue` stores a value, so it gains
-watermarks and history. Two things differ from `putValue`:
+A received channel found in the table under a primitive type is decoded into
+an `Fw::PolyType` of that type and stored exactly as `putValue` stores a value,
+so it gains watermarks and history. An enum channel serializes as its representation type
+and is mapped as that type (`TYPE_U8`, `TYPE_I32`, ...).
+
+A channel mapped as `TYPE_DATA` — a struct, string, or array channel — is not
+decoded: its serialized bytes are stored as `putData` stores data, in an entry
+`configure()` fixes as a data entry, and are read back with `getData`. They are
+the channel's FPP serialization, so a consumer decodes them with the channel
+type's own `deserializeFrom` (§5). A `TYPE_DATA` value larger than
+`MAX_DATA_SIZE` is not stored and is reported by the throttled `TlmDataTooLarge`
+warning, which `RESET_THROTTLES` re-enables; since a
+telemetry buffer may hold up to `FW_TLM_BUFFER_MAX_SIZE` bytes, size
+`MAX_DATA_SIZE` for the largest such channel.
+
+Either way, two things differ from a put:
 
 - The measurement is time tagged with the telemetry's own time tag, not with
   `timeCaller`, because the tag records when the value was sampled. This is the
-  client-supplied timestamp #5067 describes; `putValue` remains
-  component-stamped.
+  client-supplied timestamp #5067 describes; puts remain component-stamped.
 - The validity recorded is always `OK`, as telemetry carries none.
 
 A channel not in the table is ignored without comment: a component's telemetry
@@ -288,8 +309,8 @@ table, bounded by its size.
 
 `configure()` asserts that no channel and no entry appears twice in the table,
 since either would interleave unrelated values in one history, and fixes every
-mapped entry as a value entry written only by `tlmIn`, so any put to it is
-refused even before its channel first arrives. Each mapped channel must still
+mapped entry as a value entry, or for `TYPE_DATA` a data entry, written only by
+`tlmIn`, so any put to it is refused even before its channel first arrives. Each mapped channel must still
 be sent to `tlmIn` by one thread at a time (§6). The table must outlive the
 component.
 
@@ -323,9 +344,9 @@ and `Fw.Event`, imported in the FPP.
 |---|---|---|---|---|---|
 | `REPORT_WATERMARKS` | 0x00 | sync | `entry: StateBufferStoreCfg.StateEntry` | Reports an entry's watermarks with `WatermarkReport` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry or a torn read |
 | `CLEAR_WATERMARKS` | 0x01 | guarded | `entry: StateBufferStoreCfg.StateEntry` | Clears an entry's watermarks and reports it with `WatermarksCleared` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry |
-| `RESET_THROTTLES` | 0x02 | sync | none | Resets the throttles of `FailedReadCoherentData` and `TlmDecodeFailed` and reports it with `ThrottlesReset` | none |
+| `RESET_THROTTLES` | 0x02 | sync | none | Resets the throttles of `FailedReadCoherentData`, `TlmDecodeFailed`, and `TlmDataTooLarge` and reports it with `ThrottlesReset` | none |
 
-Both throttled warnings stay silent after their tenth occurrence until
+The throttled warnings stay silent after their tenth occurrence until
 `RESET_THROTTLES` is sent, so an operator who has acted on one can see whether
 the condition recurs. Each throttle covers the whole component, not one entry:
 an entry whose reader keeps tearing can use up `FailedReadCoherentData`'s
@@ -340,6 +361,7 @@ throttle and hide `INCOHERENT` reads of every other entry, so send
 | `WatermarkReport` | activity high | none | Report of an entry's watermarks (§3.7) |
 | `WatermarksCleared` | activity high | none | An entry's watermarks were cleared by command |
 | `TlmDecodeFailed` | warning high | 10 | A mapped telemetry value did not decode as its mapping's type and was not stored |
+| `TlmDataTooLarge` | warning high | 10 | A `TYPE_DATA` telemetry value exceeded `MAX_DATA_SIZE` and was not stored |
 | `ReportWatermarksRejected` | warning low | none | A `REPORT_WATERMARKS` was rejected, with the reason |
 | `ClearWatermarksRejected` | warning low | none | A `CLEAR_WATERMARKS` was rejected, with the reason |
 | `ThrottlesReset` | activity high | none | The throttled warnings' throttles were reset by command |
@@ -393,11 +415,33 @@ To also store telemetry, pass a mapping table that outlives the component:
 Svc::SbsTlmMapping stateBufferStoreTlm[] = {
     Svc::SbsTlmMapping(myChannelId, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_00,
                        Svc::SbsTlmType::TYPE_F32),
+    // A struct, string, or array channel is stored as its serialized bytes
+    Svc::SbsTlmMapping(myStructChannelId, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_01,
+                       Svc::SbsTlmType::TYPE_DATA),
 };
 
 stateBufferStore.configure(0, stateBufferStoreAllocator,
                            Fw::ExternalArray<Svc::SbsTlmMapping>(stateBufferStoreTlm,
                                                                  FW_NUM_ARRAY_ELEMENTS(stateBufferStoreTlm)));
+```
+
+A consumer of a `TYPE_DATA` entry reads it through an `Svc.SbsGetData` port
+and decodes it as the channel's type, here `MyStruct`:
+
+```c++
+U8 bytes[Svc::StateBufferStoreCfg::MAX_DATA_SIZE];
+Fw::Buffer data(bytes, sizeof bytes);
+Fw::Time measTime;
+FwSizeType size = 0;
+if (this->loadData_out(0, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_01, data, measTime, Fw::ZERO_TIME, size) ==
+    Svc::SbsStatus::OK) {
+    Fw::SerialBuffer reader(bytes, size);
+    reader.fill();
+    MyStruct value;
+    if (reader.deserializeTo(value) == Fw::FW_SERIALIZE_OK) {
+        // ... use value
+    }
+}
 ```
 
 A producer declares an output port of type `Svc.SbsPut` and a consumer one of
@@ -499,6 +543,16 @@ unconnected stamps every measurement with zero time.
   types, and a project entry list (for example XML or JSON) naming each entry,
   its depth, and any channel it stores. Both are written by hand for now, as
   `Svc::PolyDb`'s configuration is.
+- Faster telemetry lookup. `tlmIn` finds a channel's mapping by a linear scan
+  of the table (§3.8), so each received channel costs time proportional to the
+  number of mapped channels, and an unmapped channel costs a full scan. With
+  many mapped channels at high rates the scan, not the table's memory, is the
+  concern: the component holds only a pointer and size for the table, and the
+  deployment's table holds one small row per mapped channel. Either sort the
+  table in `configure()` and search it by binary search, or have the autocoder
+  above emit the table as a compile-time structure indexed by channel ID, such
+  as a sorted table or a dense array for a contiguous ID range, removing the
+  search and the hand-written table together.
 - Clearing the watermarks of all entries at once. #5067 has watermarks
   "cleared in response to a command or input port, either for individual
   entries or for all entries in the database"; `clearMinMax`,
@@ -523,12 +577,14 @@ unconnected stamps every measurement with zero time.
   ```json
   "Svc.StateBufferStore": "<instance mnemonic>",
   "Svc.StateBufferStore.quietEntry": "<value entry nothing writes during the test>",
-  "Svc.StateBufferStore.dataEntry": "<entry already stored through putData before the tests run>"
+  "Svc.StateBufferStore.dataEntry": "<entry already stored through putData before the tests run>",
+  "Svc.StateBufferStore.tlmDataEntry": "<entry the deployment maps to a telemetry channel as TYPE_DATA>"
   ```
 
-  Tests needing `quietEntry` or `dataEntry` are skipped when it is not mapped.
-  An entry's kind is fixed by its first store, so `dataEntry` must already
-  hold data when the tests run. The tests cover the ground interface only —
+  Tests needing `quietEntry`, `dataEntry`, or `tlmDataEntry` are skipped when
+  it is not mapped. An entry's kind is fixed by its first store, so `dataEntry`
+  must already hold data when the tests run; `tlmDataEntry` needs no store, as
+  `configure()` fixes its kind. The tests cover the ground interface only —
   the three commands and their events — since the ports are reachable only
   from other components.
 
@@ -537,7 +593,7 @@ unconnected stamps every measurement with zero time.
   | `test_reset_throttles` | REQ-STATEBUFFERSTORE-018 |
   | `test_clear_then_report_watermarks` | REQ-STATEBUFFERSTORE-005, -006 (command interfaces only) |
   | `test_not_an_entry_rejected` | REQ-STATEBUFFERSTORE-019 |
-  | `test_data_entry_rejected` | REQ-STATEBUFFERSTORE-016 |
+  | `test_data_entry_rejected` | REQ-STATEBUFFERSTORE-016, -017 (`TYPE_DATA` entry kind) |
 
   The remaining requirements concern the port interface and are covered by
   unit tests; once the tests have run against a deployment, add "Integration
@@ -545,9 +601,9 @@ unconnected stamps every measurement with zero time.
 
 ## 8. Unit test coverage
 
-The unit tests cover 97% of the lines of `StateBufferStore.cpp` (503 of 514)
+The unit tests cover 97% of the lines of `StateBufferStore.cpp` (522 of 533)
 and every function. gcovr counts 55.7% of branches across the component's
-source and header (993 of 1784); most of the remainder are the failure branches
+source and header (1022 of 1834); most of the remainder are the failure branches
 of `FW_ASSERT`s and of code generated by the compiler, in line with comparable
 components such as `Svc::TimeConverter`.
 
@@ -560,8 +616,9 @@ The uncovered lines are:
   between a data put's kind check and its claim. The retry and
   `INCOHERENT` paths themselves are covered through a test-only hook that
   forces torn reads.
-- The `default` case of the telemetry type switch, unreachable because the
-  generated `SbsTlmType` asserts on construction from an undefined value.
+- The `default` case of the telemetry decode switch, unreachable because
+  `tlmIn` never decodes a `TYPE_DATA` channel and the generated `SbsTlmType`
+  asserts on construction from an undefined value.
 - The closing lines of `getMinMax_handler` and `clearAndGetMinMax_handler`,
   which gcov reports as unexecuted although both handlers are exercised.
 
@@ -593,3 +650,4 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-09 | `getNHistory`'s `numMeasurements` is `FwSizeType`, matching entry depths |
 | 2026-10-09 | Puts accept only `OK` or `INVALID` validity, refusing any other with `INVALID_VALIDITY` |
 | 2026-10-09 | `putData` reports `INVALID_BUFFER_SIZE` for data larger than `MAX_DATA_SIZE`, rather than asserting |
+| 2026-10-12 | `TYPE_DATA` telemetry mappings store struct, string, and array channels as serialized bytes in a data entry; oversize reported by the throttled `TlmDataTooLarge` warning |

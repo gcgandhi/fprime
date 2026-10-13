@@ -31,7 +31,10 @@ module Svc {
         value: Fw.PolyType          @< the measurement value
     }
 
-    @ How a telemetry channel's serialized value is decoded for storage
+    @ How a telemetry channel's serialized value is stored: decoded as a
+    @ primitive type, or kept as serialized bytes for TYPE_DATA.
+    @ An enum channel maps as its representation type; a struct, string, or
+    @ array channel maps as TYPE_DATA
     enum SbsTlmType: U8 {
         TYPE_U8    @< U8 value
         TYPE_I8    @< I8 value
@@ -44,6 +47,7 @@ module Svc {
         TYPE_F32   @< F32 value
         TYPE_F64   @< F64 value
         TYPE_BOOL  @< bool value
+        TYPE_DATA  @< the channel's serialized bytes, stored in a data entry
     }
 
     @ Maps one telemetry channel to the entry that stores it.
@@ -120,7 +124,8 @@ module Svc {
     ) -> SbsStatus
 
     @ Store a string, struct, or byte-array measurement, timestamped by the
-    @ component. Reports WRONG_KIND and stores nothing if the entry holds values,
+    @ component. Reports WRONG_KIND and stores nothing if the entry holds values
+    @ or is mapped to a telemetry channel, which only tlmIn may write,
     @ INVALID_VALIDITY and stores nothing if validity is not OK or INVALID,
     @ and INVALID_BUFFER_SIZE and stores nothing if data is null or larger than
     @ StateBufferStoreCfg.MAX_DATA_SIZE

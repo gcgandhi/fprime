@@ -54,8 +54,9 @@ module Svc {
         sync input port getNHistory: SbsGetNHistory
 
         @ Port for receiving telemetry. Channels in the mapping table given to
-        @ configure() are decoded and stored in their mapped entry, stamped
-        @ with the sender's time tag; all other channels are ignored
+        @ configure() are decoded, or for TYPE_DATA kept as serialized bytes,
+        @ and stored in their mapped entry, stamped with the sender's time
+        @ tag; all other channels are ignored
         sync input port tlmIn: Fw.Tlm
 
         # ----------------------------------------------------------------------
@@ -103,8 +104,9 @@ module Svc {
             $entry: StateBufferStoreCfg.StateEntry  @< the entry to clear
         ) opcode 0x01
 
-        @ Reset the throttles of FailedReadCoherentData and TlmDecodeFailed, so
-        @ those warnings resume after the operator has acted on them
+        @ Reset the throttles of FailedReadCoherentData, TlmDecodeFailed, and
+        @ TlmDataTooLarge, so those warnings resume after the operator has
+        @ acted on them
         sync command RESET_THROTTLES opcode 0x02
 
         # ----------------------------------------------------------------------
@@ -182,11 +184,26 @@ module Svc {
         id 0x05 \
         format "CLEAR_WATERMARKS for entry {} rejected: {}"
 
-        @ The throttles of FailedReadCoherentData and TlmDecodeFailed were reset
+        @ The throttles of FailedReadCoherentData, TlmDecodeFailed, and
+        @ TlmDataTooLarge were reset
         event ThrottlesReset \
         severity activity high \
         id 0x06 \
         format "Event throttles reset"
+
+        @ A telemetry value mapped as TYPE_DATA was larger than
+        @ StateBufferStoreCfg.MAX_DATA_SIZE, so it was not stored. Indicates a
+        @ MAX_DATA_SIZE too small for the channel.
+        event TlmDataTooLarge(
+            chanId: FwChanIdType                    @< the channel received
+            $entry: StateBufferStoreCfg.StateEntry  @< the entry it maps to
+            numBytes: FwSizeType                    @< bytes received
+            maxBytes: FwSizeType                    @< MAX_DATA_SIZE
+        ) \
+        severity warning high \
+        id 0x07 \
+        format "Telemetry channel {} for entry {} is {} bytes, more than the {} an entry holds; not stored" \
+        throttle 10
 
     }
 
