@@ -62,17 +62,18 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
         KIND_DATA = 2,      //!< stored through putData
         KIND_TLM = 3,       //!< a value entry stored only through tlmIn, its sole writer port
         KIND_TLM_DATA = 4,  //!< a data entry stored only through tlmIn, its sole writer port
+        NUM_KINDS = 5,      //!< the number of kinds, for range checks; never a kind itself
     };
 
     //! A stored measurement, as held internally
     struct Measurement {
-        Fw::Time time;      //!< when the value was written
-        Fw::PolyType value;  //!< the primitive value, set by putValue (KIND_VALUE/KIND_TLM);
-                             //!< left default (TYPE_NOTYPE) for data entries, whose payload
-                             //!< lives in the paired Entry::data slot instead
+        Fw::Time time;                                //!< when the value was written
+        Fw::PolyType value;                           //!< the primitive value, set by putValue (KIND_VALUE/KIND_TLM);
+                                                      //!< left default (TYPE_NOTYPE) for data entries, whose payload
+                                                      //!< lives in the paired Entry::data slot instead
         SbsStatus validity = SbsStatus::NOT_WRITTEN;  //!< validity recorded by the writer
-        FwSizeType dataSize = 0;  //!< bytes used in the paired Entry::data slot, set by putData
-                                  //!< (KIND_DATA/KIND_TLM_DATA); 0 for value entries
+        FwSizeType dataSize = 0;                      //!< bytes used in the paired Entry::data slot, set by putData
+                                                      //!< (KIND_DATA/KIND_TLM_DATA); 0 for value entries
     };
 
     //! Per-entry control block
@@ -82,19 +83,20 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! readers without a lock, and is valid to a reader only if the
     //! coherency counter was even and unchanged across its copy.
     struct Entry {
-        Measurement* history;  //!< ring of depth measurements; history[slotIndex] is that slot's
-                                //!< time/value/validity/dataSize, set by putValue/putData
-        U8* data;               //!< depth payload slots of MAX_DATA_SIZE bytes; data[slotIndex] is the
-                                 //!< payload backing history[slotIndex], written/read by putData/getData
+        Measurement* history;               //!< ring of depth measurements; history[slotIndex] is that slot's
+                                            //!< time/value/validity/dataSize, set by putValue/putData
+        U8* data;                           //!< depth payload slots of MAX_DATA_SIZE bytes; data[slotIndex] is the
+                                            //!< payload backing history[slotIndex], written/read by putData/getData
         std::atomic<U32> coherencyCounter;  //!< odd while a write is in progress
         std::atomic<U8> kind;               //!< EntryKind, claimed by the first store or by configure()
         std::atomic<bool> clearPending;     //!< when set, the next put starts new watermarks
+        std::atomic<U8> tlmValidity;        //!< SbsStatus (OK or INVALID) tlmIn records, set by setTlmValidity
         FwSizeType depth;                   //!< configured history depth
         FwSizeType latest;                  //!< index of the most recent measurement
-        FwSizeType stored;  //!< count of slots actually written since the last clear, saturating
-                            //!< at depth once the ring has wrapped; distinguishes an unfilled
-                            //!< ring (stale/default slots beyond stored) from a full one, and
-                            //!< bounds how far history reads may walk back from latest
+        FwSizeType stored;                  //!< count of slots actually written since the last clear, saturating
+                                            //!< at depth once the ring has wrapped; distinguishes an unfilled
+                                            //!< ring (stale/default slots beyond stored) from a full one, and
+                                            //!< bounds how far history reads may walk back from latest
         Measurement min;                    //!< minimum value recorded
         Measurement max;                    //!< maximum value recorded
         Measurement retiredMin;             //!< minimum displaced by the most recent clear
@@ -215,6 +217,11 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Handler implementation for tlmIn
     void tlmIn_handler(FwIndexType portNum, FwChanIdType id, Fw::Time& timeTag, Fw::TlmBuffer& val) override;
 
+    //! Handler implementation for setTlmValidity
+    Svc::SbsStatus setTlmValidity_handler(FwIndexType portNum,
+                                          const Svc::StateBufferStoreCfg::StateEntry& entry,
+                                          const Svc::SbsStatus& validity) override;
+
     // ----------------------------------------------------------------------
     // Handler implementations for commands
     // ----------------------------------------------------------------------
@@ -279,6 +286,12 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Whether an entry kind holds string, struct, or byte-array data
     static bool isDataKind(U8 kind);
+
+    //! Assert that a loaded entry kind is below NUM_KINDS, and return it
+    static U8 checkedKind(U8 kind);
+
+    //! Load an entry's telemetry validity, asserting it is OK or INVALID
+    static SbsStatus checkedTlmValidity(const Entry& block);
 
     //! Whether a writer may record a validity: only OK and INVALID
     static bool isWriterValidity(const SbsStatus& validity);
@@ -389,6 +402,12 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Context passed to m_utBeforeRead
     void* m_utBeforeReadContext = nullptr;
+
+    //! Test-only access to an entry's control block, letting death tests
+    //! simulate memory corruption of fields fixed at configuration
+    Entry& utEntry(Svc::StateBufferStoreCfg::StateEntry::T entry) {
+        return this->m_entries[static_cast<FwSizeType>(entry)];
+    }
 #endif
 };
 

@@ -115,6 +115,9 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! REPORT_WATERMARKS emits the watermark report event
     void reportWatermarksCommandTest();
 
+    //! REPORT_WATERMARKS on an unwritten or cleared entry reports zeros with NOT_WRITTEN validity
+    void reportWatermarksNotWrittenTest();
+
     //! CLEAR_WATERMARKS clears the watermarks and reports doing so
     void clearWatermarksCommandTest();
 
@@ -194,6 +197,12 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! Struct and string telemetry mapped as TYPE_DATA is stored as its serialized bytes
     void tlmDataStoreTest();
 
+    //! setTlmValidity sets the validity recorded with later telemetry samples
+    void tlmValidityTest();
+
+    //! setTlmValidity refuses unmapped entries and store-reported statuses
+    void tlmValidityRefusedTest();
+
     //! TYPE_DATA telemetry larger than MAX_DATA_SIZE is reported, not stored
     void tlmDataOversizeTest();
 
@@ -212,7 +221,27 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A malformed telemetry mapping table asserts at configuration
     void tlmMappingDeathTest();
 
+    //! An entry control block corrupted after configure() asserts on next use
+    void corruptedEntryDeathTest();
+
   private:
+    //! A control-block field to corrupt, simulating a memory upset
+    enum class Corruption {
+        DEPTH_ZERO,         //!< depth below MIN_HISTORY_DEPTH
+        DEPTH_ABOVE_MAX,    //!< depth above MAX_HISTORY_DEPTH
+        INDEX,              //!< index not the entry's own
+        HISTORY_NULL,       //!< history ring pointer cleared
+        DATA_NULL,          //!< payload pointer cleared
+        LATEST_VALUE_READ,  //!< latest outside the ring, then a value read
+        LATEST_DATA_READ,   //!< latest outside the ring, then a data read
+        STORED,             //!< stored above depth, then a put
+        LATEST_PUT,         //!< latest outside the ring, then a put
+        INDEX_DURING_READ,  //!< index corrupted mid-read, read never coherent
+        KIND,               //!< kind outside EntryKind, then a value read
+        KIND_DURING_READ,   //!< kind outside EntryKind mid-read, then a history read
+        TLM_VALIDITY,       //!< telemetry validity not OK or INVALID, then a telemetry sample
+    };
+
     // ----------------------------------------------------------------------
     // Helper functions
     // ----------------------------------------------------------------------
@@ -233,6 +262,15 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
 
     //! Store a value in ENTRY_A from inside a read, via the component's test hook
     static void putDuringRead(void* context);
+
+    //! Corrupt one of ENTRY_A's or ENTRY_B's control-block fields and use the entry
+    void useCorrupted(Corruption corruption);
+
+    //! Corrupt ENTRY_A's index from inside a read, via the component's test hook
+    static void corruptIndexDuringRead(void* context);
+
+    //! Corrupt ENTRY_A's kind from inside a read, via the component's test hook
+    static void corruptKindDuringRead(void* context);
 
     //! Connect ports
     void connectPorts();

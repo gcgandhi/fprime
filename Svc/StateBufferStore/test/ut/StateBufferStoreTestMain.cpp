@@ -172,6 +172,13 @@ TEST(Nominal, ReportWatermarksCommand) {
     tester.reportWatermarksCommandTest();
 }
 
+TEST(Nominal, ReportWatermarksNotWritten) {
+    COMMENT("REPORT_WATERMARKS on an unwritten or cleared entry succeeds, reporting zeros with NOT_WRITTEN validity");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-005");
+    Svc::StateBufferStoreTester tester;
+    tester.reportWatermarksNotWrittenTest();
+}
+
 TEST(Nominal, ClearWatermarksCommand) {
     COMMENT("CLEAR_WATERMARKS clears the watermarks and reports doing so");
     REQUIREMENT("REQ-STATEBUFFERSTORE-006");
@@ -348,6 +355,20 @@ TEST(Nominal, TlmDataStore) {
     tester.tlmDataStoreTest();
 }
 
+TEST(Nominal, TlmValidity) {
+    COMMENT("setTlmValidity sets the validity recorded with later telemetry samples");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-020");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmValidityTest();
+}
+
+TEST(OffNominal, TlmValidityRefused) {
+    COMMENT("setTlmValidity refuses unmapped entries and store-reported statuses");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-020");
+    Svc::StateBufferStoreTester tester;
+    tester.tlmValidityRefusedTest();
+}
+
 TEST(OffNominal, TlmDataOversize) {
     COMMENT("TYPE_DATA telemetry larger than MAX_DATA_SIZE is reported, not stored");
     REQUIREMENT("REQ-STATEBUFFERSTORE-017");
@@ -392,7 +413,7 @@ TEST(Nominal, NHistoryTooDeep) {
 }
 
 TEST(OffNominal, EmptyBuffer) {
-    COMMENT("An empty Fw::Buffer is judged by its size on every port, never asserted on");
+    COMMENT("An empty or null Fw::Buffer is refused on every port, never asserted on");
     REQUIREMENT("REQ-STATEBUFFERSTORE-004");
     REQUIREMENT("REQ-STATEBUFFERSTORE-008");
     REQUIREMENT("REQ-STATEBUFFERSTORE-009");
@@ -421,6 +442,13 @@ TEST(Death, TlmMapping) {
     REQUIREMENT("REQ-STATEBUFFERSTORE-017");
     Svc::StateBufferStoreTester tester;
     tester.tlmMappingDeathTest();
+}
+
+TEST(Death, CorruptedEntry) {
+    COMMENT("An entry control block corrupted after configure() asserts on next use");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-010");
+    Svc::StateBufferStoreTester tester;
+    tester.corruptedEntryDeathTest();
 }
 
 int main(int argc, char** argv) {

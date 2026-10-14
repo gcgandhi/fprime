@@ -18,7 +18,7 @@ module Svc {
         NOT_WRITTEN = 2          @< measurement has never been written
         INVALID = 3              @< measurement marked invalid by the writer
         NOT_FRESH = 4            @< measurement unchanged since the caller's last read
-        INVALID_BUFFER_SIZE = 5  @< caller buffer too small for the read, or put data null or larger than MAX_DATA_SIZE
+        INVALID_BUFFER_SIZE = 5  @< caller buffer null or too small for the read, or put data null or larger than MAX_DATA_SIZE
         INCOHERENT = 6           @< no coherent read within MAX_READ_ITERATIONS
         WRONG_KIND = 7           @< entry holds the other kind of measurement (value vs. data), or only tlmIn may write it
         INVALID_VALIDITY = 8     @< a put's validity is not OK or INVALID
@@ -96,6 +96,20 @@ module Svc {
         $entry: StateBufferStoreCfg.StateEntry  @< the entry to read and clear
         ref min: SbsMeasurement                 @< populated with the minimum
         ref max: SbsMeasurement                 @< populated with the maximum
+    ) -> SbsStatus
+
+    @ Set the validity tlmIn records with each later sample of a
+    @ telemetry-mapped entry, in force until set again; OK until first set.
+    @ It is the producer's validity state, not a per-sample flag: set it when
+    @ the source's validity changes, and set OK again when it recovers. It is
+    @ not consumed by a sample because a send-on-change channel may never
+    @ send the sample it was meant for. REPORT_WATERMARKS reports the validity
+    @ in force. The sample already stored keeps its own validity. Reports WRONG_KIND if
+    @ the entry is not mapped to a telemetry channel, and INVALID_VALIDITY if
+    @ validity is not OK or INVALID; neither changes the validity in force
+    port SbsSetTlmValidity(
+        $entry: StateBufferStoreCfg.StateEntry  @< the telemetry-mapped entry
+        validity: SbsStatus                     @< validity to record with later samples: OK or INVALID
     ) -> SbsStatus
 
     @ Get an entry's full measurement history, oldest first, as serialized

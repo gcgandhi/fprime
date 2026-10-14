@@ -111,7 +111,7 @@ def test_clear_then_report_watermarks(fprime_test_api):
         [
             fprime_test_api.get_event_pred(
                 sbs + ".WatermarkReport",
-                [entry, 0.0, 0, "NOT_WRITTEN", 0.0, 0, "NOT_WRITTEN"],
+                [entry, 0.0, 0, "NOT_WRITTEN", 0.0, 0, "NOT_WRITTEN", "OK"],
             ),
             _completed(fprime_test_api, report),
         ],

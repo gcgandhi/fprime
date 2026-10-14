@@ -52,6 +52,7 @@ derives from in the heritage module's specification.
 | REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type or, for a channel mapped as serialized data, as its serialized bytes, and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, throttled per §3.11, storing nothing, when a mapped value does not decode as its type or serialized data exceeds the configured maximum data size. | Unit Test |
 | REQ-STATEBUFFERSTORE-018 | derived | `Svc::StateBufferStore` shall provide a command that resets the throttles of its throttled warning events, so that a throttled warning is reported again when its condition recurs. | Unit Test |
 | REQ-STATEBUFFERSTORE-019 | derived | `Svc::StateBufferStore` shall reject a watermark command whose entry argument names no entry with `VALIDATION_ERROR`, reporting the rejection as an event. | Unit Test |
+| REQ-STATEBUFFERSTORE-020 | derived (HER-0004, .0005) | `Svc::StateBufferStore` shall provide a synchronous interface to set the validity, `OK` or `INVALID`, recorded with each later sample of a telemetry-mapped entry until set again, `OK` until first set, and shall report `WRONG_KIND` for an entry not mapped to telemetry and `INVALID_VALIDITY` for any other validity, changing nothing. | Unit Test |
 
 Heritage requirements HER-0001, .0002, and .0003 govern shared-memory
 allocation across space partitions and initialization order between them.
@@ -71,6 +72,7 @@ Space partitioning is out of scope for this component, so they are not ported.
    getHistory        <--->|                         |----> cmdResponseOut
    getNHistory       <--->|                         |----> cmdRegOut
    tlmIn             ---->|                         |----> logTextOut
+   setTlmValidity    <--->|                         |
                           |                         |
    (privileged)           |                         |
    clearMinMax       <--->|                         |
@@ -109,6 +111,10 @@ functions, and each `copy()` would exist without the template. A virtual
 `copy()` on a common snapshot base, or a function pointer with a `void*`
 context, would leave one loop but add an indirect call to every attempt, and
 the function pointer would also lose type checking, so the template is kept.
+The `decodeAs` and `widen` helpers, templated on the value type, add no code
+of their own: each instance calls a different `deserializeTo` or
+`Fw::PolyType::get` overload that a hand-written `switch` case would call
+anyway, and optimized builds inline them into their `switch`.
 
 The counter admits one writer per entry. A telemetry-mapped entry refuses
 puts, so `tlmIn` is its only writer port; that its channel is sent to `tlmIn`
@@ -122,7 +128,9 @@ The counter is `std::atomic<U32>`. The writer's increments and the reader's
 samples use the fence placement of a standard sequence lock (a release fence
 after the first increment, an acquire fence before the second sample), the
 ordering that keeps the protected stores and loads inside the counter
-increments on weakly ordered processors. The heritage module used `volatile` reads and a
+increments on weakly ordered processors. The counter operations themselves use
+the default sequentially consistent ordering, so the two fences are the only
+explicit memory ordering in the protocol. The heritage module used `volatile` reads and a
 platform atomic-increment routine; `volatile` is not a substitute for atomics in
 C++, so this is a deliberate upgrade. The counter wraps after 2^32 increments,
 which is harmless: only equality between two adjacent samples matters.
@@ -297,7 +305,23 @@ Either way, two things differ from a put:
 - The measurement is time tagged with the telemetry's own time tag, not with
   `timeCaller`, because the tag records when the value was sampled. This is the
   client-supplied timestamp #5067 describes; puts remain component-stamped.
-- The validity recorded is always `OK`, as telemetry carries none.
+- Telemetry carries no validity, so the one recorded is the entry's
+  telemetry validity: `OK` until the channel's producer sets it with
+  `setTlmValidity`, then whatever was last set. It is the producer's validity
+  *state*, not a per-sample flag: the producer calls
+  `setTlmValidity(entry, INVALID)` when its source goes bad and `OK` when it
+  recovers, not before every sample. Called from the producer's own thread,
+  it takes effect for the very next sample; a sample already stored keeps the
+  validity it was recorded with. A one-shot flag, consumed by the next sample,
+  was rejected for two reasons. A send-on-change channel may never send the
+  sample it was meant for, so the mark would land on a later, possibly good
+  one. And a forgotten mark would record bad data as `OK`, whereas a forgotten
+  reset records good data as `INVALID`, the conservative failure.
+  `REPORT_WATERMARKS` reports the validity in force, so one left `INVALID` is
+  visible from the ground. The port writes only that per-entry
+  atomic, never the counter-protected fields, so `tlmIn` remains the entry's
+  one writer. It reports `WRONG_KIND` for an entry not mapped to telemetry,
+  which carries validity with each put instead.
 
 A channel not in the table is ignored without comment: a component's telemetry
 port carries all of its channels, and the store holds only those mapped. A
@@ -326,6 +350,7 @@ component.
 | `getHistory` | sync input | `Svc.SbsGetHistory` | Gets an entry's full history |
 | `getNHistory` | sync input | `Svc.SbsGetNHistory` | Gets an entry's most recent N measurements |
 | `tlmIn` | sync input | `Fw.Tlm` | Receives telemetry, storing mapped channels (§3.8) |
+| `setTlmValidity` | sync input | `Svc.SbsSetTlmValidity` | Sets the validity recorded with a telemetry-mapped entry's later samples (§3.8) |
 | `clearMinMax` | guarded input | `Svc.SbsClearMinMax` | Clears an entry's watermarks (privileged, §3.5) |
 | `clearAndGetMinMax` | guarded input | `Svc.SbsClearAndGetMinMax` | Gets an entry's watermarks, then clears them (privileged, §3.5) |
 | `cmdIn` | command recv | `Fw.Cmd` | Receives commands |
@@ -342,7 +367,7 @@ and `Fw.Event`, imported in the FPP.
 
 | Command | Opcode | Kind | Argument | Description | Failure |
 |---|---|---|---|---|---|
-| `REPORT_WATERMARKS` | 0x00 | sync | `entry: StateBufferStoreCfg.StateEntry` | Reports an entry's watermarks with `WatermarkReport` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry or a torn read |
+| `REPORT_WATERMARKS` | 0x00 | sync | `entry: StateBufferStoreCfg.StateEntry` | Reports an entry's watermarks, and its telemetry validity (§3.8), with `WatermarkReport`; an entry never written, or cleared with no put since, reports zeros with `NOT_WRITTEN` validity and succeeds | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry or a torn read |
 | `CLEAR_WATERMARKS` | 0x01 | guarded | `entry: StateBufferStoreCfg.StateEntry` | Clears an entry's watermarks and reports it with `WatermarksCleared` | `VALIDATION_ERROR` for `NUM_ENTRIES`; `EXECUTION_ERROR` for a data entry |
 | `RESET_THROTTLES` | 0x02 | sync | none | Resets the throttles of `FailedReadCoherentData`, `TlmDecodeFailed`, and `TlmDataTooLarge` and reports it with `ThrottlesReset` | none |
 
@@ -394,7 +419,9 @@ only ever hold primitives, projects storing few structures should keep
 Reads also use the caller's stack for their scratch copy: `getData` takes
 `MAX_DATA_SIZE` bytes, and `getHistory` and `getNHistory` take
 `MAX_HISTORY_DEPTH * SbsMeasurement::SERIALIZED_SIZE` bytes. Size the stacks of
-reading threads for these, especially after raising `MAX_DATA_SIZE`.
+reading threads for these, especially after raising `MAX_DATA_SIZE`. A
+compile-time check caps `MAX_HISTORY_DEPTH` at 64, which bounds the history
+scratch at 1.5 KiB with the default 24-byte record.
 
 ## 5. Usage
 
@@ -623,9 +650,21 @@ The uncovered lines are:
   which gcov reports as unexecuted although both handlers are exercised.
 
 The assertion paths — use before `configure()`, configuring twice, an untyped
-value, and a malformed telemetry table — are verified by death tests. Death
-tests run in a child process that exits through the assertion, so they do not
-contribute to the coverage figures. A short allocation is not tested: the
+value, a malformed telemetry table, and an entry control block corrupted after
+`configure()` (depth, index, ring and payload pointers, latest slot, stored
+count, kind, telemetry validity) — are verified by death tests. The corruption checks guard against
+memory upsets such as radiation-induced bit flips. Some cannot be reached once
+the others hold, so they are not tested: the slot indices computed by
+`Fw::CircularIndex`, which reduces them modulo the depth (the writer's new slot
+and each history record's slot), the bound on a history snapshot's record
+count, the size checks on the history copy out, and the null check on a data
+store's source, which `putData` refuses first and `Fw::TlmBuffer` never
+supplies. The stores' precondition that a validity is `OK` or `INVALID` is
+likewise untested: `putValue`, `putData`, and `setTlmValidity` refuse any other
+validity first, and `tlmIn` checks the telemetry validity itself, an assertion
+covered by the corrupted-entry death test. Death tests run in a
+child process that exits through the assertion, so they do not contribute to
+the coverage figures. A short allocation is not tested: the
 component requests memory with `Fw::MemAllocator::checkedAllocate`, which
 asserts inside `Fw` before the component sees the result.
 
@@ -651,3 +690,11 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-09 | Puts accept only `OK` or `INVALID` validity, refusing any other with `INVALID_VALIDITY` |
 | 2026-10-09 | `putData` reports `INVALID_BUFFER_SIZE` for data larger than `MAX_DATA_SIZE`, rather than asserting |
 | 2026-10-12 | `TYPE_DATA` telemetry mappings store struct, string, and array channels as serialized bytes in a data entry; oversize reported by the throttled `TlmDataTooLarge` warning |
+| 2026-10-13 | Coherency counter operations use the default ordering, leaving the two sequence-lock fences as the only explicit memory ordering |
+| 2026-10-13 | Assertions recheck entry control blocks, including the entry kind, at each use against memory corruption, verified by death tests |
+| 2026-10-14 | Value and data stores assert their validity is one a writer may record |
+| 2026-10-14 | `MAX_HISTORY_DEPTH` capped at 64 at compile time, bounding the history read's stack scratch |
+| 2026-10-14 | Reads with something to copy refuse a null `Fw::Buffer` with `INVALID_BUFFER_SIZE`, rather than asserting, even when its size is nonzero |
+| 2026-10-14 | `REPORT_WATERMARKS` on an unwritten or cleared entry documented and tested: zeros with `NOT_WRITTEN` validity, `OK` response |
+| 2026-10-14 | `setTlmValidity` port: a telemetry producer sets the validity `tlmIn` records with later samples, rather than always `OK` (REQ-020) |
+| 2026-10-14 | Telemetry validity documented as the producer's state, in force until changed; `WatermarkReport` reports it |

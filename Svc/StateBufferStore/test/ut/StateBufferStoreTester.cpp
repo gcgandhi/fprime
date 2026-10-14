@@ -28,6 +28,9 @@ constexpr FwSizeType DEPTH = StateBufferStoreCfg::DEFAULT_HISTORY_DEPTH;
 //! Value stored by putDuringRead
 constexpr I32 RACING_PUT_VALUE = 500;
 
+//! A kind byte no EntryKind uses, as a memory upset might leave it
+constexpr U8 CORRUPT_KIND = 9;
+
 //! Memory identifier the component under test allocates under
 constexpr FwEnumStoreType TEST_MEM_ID = 0;
 
@@ -171,6 +174,89 @@ SbsMeasurement StateBufferStoreTester::readRecord(const Fw::Buffer& data, FwSize
 void StateBufferStoreTester::putDuringRead(void* context) {
     StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
     tester->put(ENTRY_A, Fw::PolyType(RACING_PUT_VALUE), 99);
+}
+
+void StateBufferStoreTester::corruptIndexDuringRead(void* context) {
+    StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
+    tester->component.utEntry(ENTRY_A).index = StateBufferStoreCfg::StateEntry::NUM_ENTRIES;
+}
+
+void StateBufferStoreTester::corruptKindDuringRead(void* context) {
+    StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
+    tester->component.utEntry(ENTRY_A).kind.store(CORRUPT_KIND);
+}
+
+void StateBufferStoreTester::useCorrupted(Corruption corruption) {
+    auto& blockA = this->component.utEntry(ENTRY_A);
+    auto& blockB = this->component.utEntry(ENTRY_B);
+    switch (corruption) {
+        case Corruption::DEPTH_ZERO:
+            blockA.depth = 0;
+            break;
+        case Corruption::DEPTH_ABOVE_MAX:
+            blockA.depth = StateBufferStoreCfg::MAX_HISTORY_DEPTH + 1;
+            break;
+        case Corruption::INDEX:
+            blockA.index = static_cast<FwSizeType>(ENTRY_B);
+            break;
+        case Corruption::HISTORY_NULL:
+            blockA.history = nullptr;
+            break;
+        case Corruption::DATA_NULL:
+            blockA.data = nullptr;
+            break;
+        case Corruption::LATEST_VALUE_READ:
+            blockA.latest = blockA.depth;
+            break;
+        case Corruption::LATEST_DATA_READ: {
+            blockB.latest = blockB.depth;
+            U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+            Fw::Buffer out(readBack, sizeof readBack);
+            Fw::Time measTime;
+            FwSizeType sizeOut = 0;
+            (void)this->invoke_to_getData(0, ENTRY_B, out, measTime, Fw::Time(), sizeOut);
+            return;
+        }
+        case Corruption::STORED:
+            blockA.stored = blockA.depth + 1;
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
+            return;
+        case Corruption::LATEST_PUT:
+            blockA.latest = blockA.depth;
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
+            return;
+        case Corruption::INDEX_DURING_READ:
+            // checkedEntry() sees a sound index; the hook corrupts it once the
+            // read is under way, and forced torn reads carry it to the warning
+            this->component.m_utBeforeRead = &StateBufferStoreTester::corruptIndexDuringRead;
+            this->component.m_utBeforeReadContext = this;
+            this->component.m_utForceTornReads = StateBufferStoreCfg::MAX_READ_ITERATIONS;
+            break;
+        case Corruption::KIND:
+            blockA.kind.store(CORRUPT_KIND);
+            break;
+        case Corruption::TLM_VALIDITY: {
+            this->component.utEntry(ENTRY_TLM_U32).tlmValidity.store(static_cast<U8>(SbsStatus::NOT_FRESH));
+            Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+            Fw::TlmBuffer u32Value;
+            (void)u32Value.serializeFrom(static_cast<U32>(1));
+            this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, u32Value);
+            return;
+        }
+        case Corruption::KIND_DURING_READ: {
+            // checkedEntry() sees a sound kind; the hook corrupts it before
+            // the snapshot copies it
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
+            this->component.m_utBeforeRead = &StateBufferStoreTester::corruptKindDuringRead;
+            this->component.m_utBeforeReadContext = this;
+            U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
+            Fw::Buffer data(bytes, sizeof bytes);
+            FwSizeType sizeOut = 0;
+            (void)this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut);
+            return;
+        }
+    }
+    (void)this->get(ENTRY_A, SbsStatus::OK);
 }
 
 // ----------------------------------------------------------------------
@@ -600,7 +686,30 @@ void StateBufferStoreTester::reportWatermarksCommandTest() {
 
     ASSERT_EVENTS_SIZE(1);
     ASSERT_EVENTS_WatermarkReport_SIZE(1);
-    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, -2.0, 1000000, SbsStatus::OK, 9.0, 2000000, SbsStatus::OK);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, -2.0, 1000000, SbsStatus::OK, 9.0, 2000000, SbsStatus::OK, SbsStatus::OK);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void StateBufferStoreTester::reportWatermarksNotWrittenTest() {
+    // Never written: zeros with NOT_WRITTEN validity, and the command succeeds
+    U32 cmdSeq = this->m_cmdSeq++;
+    this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, cmdSeq, ENTRY_A);
+    ASSERT_EVENTS_SIZE(1);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, 0.0, 0, SbsStatus::NOT_WRITTEN, 0.0, 0, SbsStatus::NOT_WRITTEN,
+                                  SbsStatus::OK);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, cmdSeq, Fw::CmdResponse::OK);
+
+    // Written, then cleared with no put since: the same report
+    this->put(ENTRY_A, Fw::PolyType(static_cast<I32>(4)), 1);
+    ASSERT_EQ(this->invoke_to_clearMinMax(0, ENTRY_A), SbsStatus::OK);
+    this->clearHistory();
+    cmdSeq = this->m_cmdSeq++;
+    this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, cmdSeq, ENTRY_A);
+    ASSERT_EVENTS_SIZE(1);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, 0.0, 0, SbsStatus::NOT_WRITTEN, 0.0, 0, SbsStatus::NOT_WRITTEN,
+                                  SbsStatus::OK);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, StateBufferStore::OPCODE_REPORT_WATERMARKS, cmdSeq, Fw::CmdResponse::OK);
 }
@@ -679,7 +788,7 @@ void StateBufferStoreTester::watermarkReportAllTypesTest() {
         ASSERT_EVENTS_WatermarkReport_SIZE(1);
         // A single stored value is both watermarks
         ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, testCase.expected, 1000000, SbsStatus::OK, testCase.expected, 1000000,
-                                      SbsStatus::OK);
+                                      SbsStatus::OK, SbsStatus::OK);
     }
 
     // bool reports as 1 or 0. Clear first: the entries above already hold a
@@ -691,7 +800,7 @@ void StateBufferStoreTester::watermarkReportAllTypesTest() {
     const U32 boolSeq = this->m_cmdSeq++;
     this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, boolSeq, ENTRY_A);
     ASSERT_EVENTS_WatermarkReport_SIZE(1);
-    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, 1.0, 2000000, SbsStatus::OK, 1.0, 2000000, SbsStatus::OK);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_A, 1.0, 2000000, SbsStatus::OK, 1.0, 2000000, SbsStatus::OK, SbsStatus::OK);
 
     // A cleared watermark holds no type at all, so there is no value to widen
     ASSERT_EQ(this->invoke_to_clearMinMax(0, ENTRY_B), SbsStatus::OK);
@@ -699,7 +808,8 @@ void StateBufferStoreTester::watermarkReportAllTypesTest() {
     const U32 clearedSeq = this->m_cmdSeq++;
     this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, clearedSeq, ENTRY_B);
     ASSERT_EVENTS_WatermarkReport_SIZE(1);
-    ASSERT_EVENTS_WatermarkReport(0, ENTRY_B, 0.0, 0, SbsStatus::NOT_WRITTEN, 0.0, 0, SbsStatus::NOT_WRITTEN);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_B, 0.0, 0, SbsStatus::NOT_WRITTEN, 0.0, 0, SbsStatus::NOT_WRITTEN,
+                                  SbsStatus::OK);
 }
 
 void StateBufferStoreTester::oversizedPutDataTest() {
@@ -742,6 +852,20 @@ void StateBufferStoreTester::emptyBufferTest() {
     sizeOut = 1;
     ASSERT_EQ(this->invoke_to_getData(0, ENTRY_B, empty, measTime, Fw::Time(), sizeOut),
               SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+
+    // A null pointer with a nonzero size passes every size check, so the
+    // reads must refuse it themselves rather than assert
+    Fw::Buffer nullSized(nullptr, StateBufferStoreCfg::MAX_DATA_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_B, nullSized, measTime, Fw::Time(), sizeOut),
+              SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, nullSized, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
+    ASSERT_EQ(sizeOut, 0u);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 1, nullSized, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
     ASSERT_EQ(sizeOut, 0u);
 }
 
@@ -1330,6 +1454,77 @@ void StateBufferStoreTester::tlmDataStoreTest() {
     ASSERT_EVENTS_SIZE(0);
 }
 
+void StateBufferStoreTester::tlmValidityTest() {
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer first;
+    ASSERT_EQ(first.serializeFrom(static_cast<U32>(5)), Fw::FW_SERIALIZE_OK);
+    ASSERT_EQ(this->invoke_to_setTlmValidity(0, ENTRY_TLM_U32, SbsStatus::INVALID), SbsStatus::OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, first);
+
+    Fw::PolyType value;
+    Fw::Time measTime;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_U32, value, measTime, Fw::Time()), SbsStatus::INVALID);
+    ASSERT_EQ(static_cast<U32>(value), 5u);
+    SbsMeasurement min;
+    SbsMeasurement max;
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_TLM_U32, min, max), SbsStatus::OK);
+    ASSERT_EQ(min.get_validity(), SbsStatus::INVALID);
+    ASSERT_EQ(max.get_validity(), SbsStatus::INVALID);
+
+    // The validity in force is reported from the ground, so one left INVALID is visible
+    const U32 cmdSeq = this->m_cmdSeq++;
+    this->sendCmd_REPORT_WATERMARKS(StateBufferStoreTester::TEST_INSTANCE_ID, cmdSeq, ENTRY_TLM_U32);
+    ASSERT_EVENTS_WatermarkReport_SIZE(1);
+    ASSERT_EVENTS_WatermarkReport(0, ENTRY_TLM_U32, 5.0, 70000000, SbsStatus::INVALID, 5.0, 70000000,
+                                  SbsStatus::INVALID, SbsStatus::INVALID);
+    this->clearHistory();
+
+    // In force until set again: the next sample is OK, the earlier one keeps INVALID
+    ASSERT_EQ(this->invoke_to_setTlmValidity(0, ENTRY_TLM_U32, SbsStatus::OK), SbsStatus::OK);
+    Fw::Time laterTag(TimeBase::TB_WORKSTATION_TIME, 71, 0);
+    Fw::TlmBuffer second;
+    ASSERT_EQ(second.serializeFrom(static_cast<U32>(6)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, laterTag, second);
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_U32, value, measTime, Fw::Time()), SbsStatus::OK);
+
+    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
+    Fw::Buffer data(bytes, sizeof bytes);
+    FwSizeType sizeOut = 0;
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_TLM_U32, data, sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, 2u * RECORD_SIZE);
+    ASSERT_EQ(this->readRecord(data, 0).get_validity(), SbsStatus::INVALID);
+    ASSERT_EQ(this->readRecord(data, 1).get_validity(), SbsStatus::OK);
+
+    // A TYPE_DATA entry records it the same way
+    ASSERT_EQ(this->invoke_to_setTlmValidity(0, ENTRY_TLM_STRUCT, SbsStatus::INVALID), SbsStatus::OK);
+    const SbsMeasurement sent(Fw::Time(TimeBase::TB_WORKSTATION_TIME, 3, 4), SbsStatus::OK,
+                              Fw::PolyType(static_cast<I16>(-7)));
+    Fw::TlmBuffer structValue;
+    ASSERT_EQ(structValue.serializeFrom(sent), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_STRUCT, tag, structValue);
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_TLM_STRUCT, out, measTime, Fw::Time(), sizeOut), SbsStatus::INVALID);
+    ASSERT_EQ(sizeOut, structValue.getSize());
+
+    ASSERT_EVENTS_SIZE(0);
+}
+
+void StateBufferStoreTester::tlmValidityRefusedTest() {
+    // Entries not mapped to telemetry carry validity with each put
+    ASSERT_EQ(this->invoke_to_setTlmValidity(0, ENTRY_A, SbsStatus::INVALID), SbsStatus::WRONG_KIND);
+
+    // A status the store reports itself is refused and leaves OK in force
+    ASSERT_EQ(this->invoke_to_setTlmValidity(0, ENTRY_TLM_U32, SbsStatus::NOT_FRESH), SbsStatus::INVALID_VALIDITY);
+    Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
+    Fw::TlmBuffer u32Value;
+    ASSERT_EQ(u32Value.serializeFrom(static_cast<U32>(1)), Fw::FW_SERIALIZE_OK);
+    this->invoke_to_tlmIn(0, TLM_CHAN_U32, tag, u32Value);
+    Fw::PolyType value;
+    Fw::Time measTime;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_U32, value, measTime, Fw::Time()), SbsStatus::OK);
+}
+
 void StateBufferStoreTester::tlmDataOversizeTest() {
     if (StateBufferStoreCfg::MAX_DATA_SIZE >= FW_TLM_BUFFER_MAX_SIZE) {
         GTEST_SKIP() << "MAX_DATA_SIZE holds any telemetry buffer, so no TYPE_DATA value can be oversized";
@@ -1444,6 +1639,28 @@ void StateBufferStoreTester::tlmMappingDeathTest() {
 
     // A well-formed table configures cleanly
     configureWithMappings(TLM_MAPPINGS, FW_NUM_ARRAY_ELEMENTS(TLM_MAPPINGS));
+}
+
+void StateBufferStoreTester::corruptedEntryDeathTest() {
+    // Each corruption happens inside the death statement, in the child, so
+    // this tester's own component is never left corrupted
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::DEPTH_ZERO), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::DEPTH_ABOVE_MAX), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::INDEX), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::HISTORY_NULL), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::DATA_NULL), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::LATEST_VALUE_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::LATEST_DATA_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::STORED), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::LATEST_PUT), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::INDEX_DURING_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_DURING_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::TLM_VALIDITY), "StateBufferStore.cpp");
+
+    // Uncorrupted, the same entries still work
+    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
+    (void)this->get(ENTRY_A, SbsStatus::OK);
 }
 
 }  // namespace Svc

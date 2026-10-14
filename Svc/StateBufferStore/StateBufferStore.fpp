@@ -59,6 +59,11 @@ module Svc {
         @ tag; all other channels are ignored
         sync input port tlmIn: Fw.Tlm
 
+        @ Port setting the validity tlmIn records for a telemetry-mapped entry,
+        @ in force until set again. Called by the channel's producer when its
+        @ source's validity changes: telemetry itself carries no validity
+        sync input port setTlmValidity: SbsSetTlmValidity
+
         # ----------------------------------------------------------------------
         # Privileged store interface
         #
@@ -139,10 +144,11 @@ module Svc {
             maxValue: F64                           @< maximum value recorded
             maxTime_us: I64                         @< when the maximum was recorded
             maxValidity: SbsStatus                  @< validity of the maximum
+            tlmValidity: SbsStatus                  @< validity tlmIn records with later samples; OK if not mapped to telemetry
         ) \
         severity activity high \
         id 0x01 \
-        format "Entry {} watermarks: min {} at {} us ({}), max {} at {} us ({})"
+        format "Entry {} watermarks: min {} at {} us ({}), max {} at {} us ({}), telemetry validity {}"
 
         @ An entry's minimum and maximum measurements were cleared
         event WatermarksCleared(

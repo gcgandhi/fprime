@@ -45,7 +45,9 @@ module Svc {
     }
 
     @ Upper bound on any entry's history depth. Bounds the history read
-    @ interfaces and sizes the worst-case allocation.
+    @ interfaces and sizes the worst-case allocation. At most 64:
+    @ StateBufferStore asserts this at compile time, because history reads
+    @ hold this many serialized records on the reading thread's stack.
     constant MAX_HISTORY_DEPTH = 16
 
     @ Smallest history depth an entry may be configured with, the floor set
