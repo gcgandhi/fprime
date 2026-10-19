@@ -290,6 +290,18 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Assert that a loaded entry kind is below NUM_KINDS, and return it
     static U8 checkedKind(U8 kind);
 
+    //! Whether a read of an entry may proceed, decided from its kind alone
+    //!
+    //! WRONG_KIND for an entry of the other kind, NOT_WRITTEN for an entry
+    //! never claimed and so never stored to, or OK to read.
+    static SbsStatus readableKind(const Entry& block, bool valueRead);
+
+    //! Assert that a coherent read's snapshot is still of the read's kind
+    //!
+    //! A read proceeds only on an entry already of its kind, which never
+    //! changes once claimed, so another kind here means corruption.
+    static void checkSnapshotKind(U8 kind, bool valueRead);
+
     //! Load an entry's telemetry validity, asserting it is OK or INVALID
     static SbsStatus checkedTlmValidity(const Entry& block);
 
@@ -344,6 +356,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Fill an SbsMeasurement from an internal measurement, honoring a clear
     static void reportWatermark(const Measurement& source, bool cleared, Svc::SbsMeasurement& out);
+
+    //! Fill an SbsMeasurement as a watermark with nothing recorded: zeroed, NOT_WRITTEN
+    static void reportNotWritten(Svc::SbsMeasurement& out);
 
     //! Widen a stored value to F64 for event reporting
     //!

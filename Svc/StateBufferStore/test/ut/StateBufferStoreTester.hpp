@@ -167,6 +167,12 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
     //! A full-history read of a data entry reports WRONG_KIND before judging its buffer
     void dataEntryKindCheckedFirstTest();
 
+    //! A latest-value read of the wrong kind reports WRONG_KIND, not INCOHERENT, even racing a writer
+    void wrongKindLatestReadNotTornTest();
+
+    //! Every read of an entry never stored to reports NOT_WRITTEN without reading it
+    void unwrittenReadsSkipReadTest();
+
     //! Each entry keeps its own configured depth, including the bounds
     void perEntryDepthTest();
 
@@ -239,6 +245,10 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
         INDEX_DURING_READ,  //!< index corrupted mid-read, read never coherent
         KIND,               //!< kind outside EntryKind, then a value read
         KIND_DURING_READ,   //!< kind outside EntryKind mid-read, then a history read
+        KIND_FLIP_VALUE_READ,      //!< value entry's kind flipped to data mid-read, then a value read
+        KIND_FLIP_DATA_READ,       //!< data entry's kind flipped to value mid-read, then a data read
+        KIND_FLIP_WATERMARK_READ,  //!< value entry's kind flipped to data mid-read, then a watermark read
+        KIND_FLIP_HISTORY_READ,    //!< value entry's kind flipped to data mid-read, then a history read
         TLM_VALIDITY,       //!< telemetry validity not OK or INVALID, then a telemetry sample
     };
 
@@ -271,6 +281,12 @@ class StateBufferStoreTester : public StateBufferStoreGTestBase {
 
     //! Corrupt ENTRY_A's kind from inside a read, via the component's test hook
     static void corruptKindDuringRead(void* context);
+
+    //! Flip ENTRY_A's kind to data from inside a read, via the component's test hook
+    static void flipToDataKindDuringRead(void* context);
+
+    //! Flip ENTRY_B's kind to value from inside a read, via the component's test hook
+    static void flipToValueKindDuringRead(void* context);
 
     //! Connect ports
     void connectPorts();

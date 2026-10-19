@@ -280,6 +280,20 @@ TEST(OffNominal, DataEntryKindCheckedFirst) {
     tester.dataEntryKindCheckedFirstTest();
 }
 
+TEST(OffNominal, WrongKindLatestReadNotTorn) {
+    COMMENT("A latest-value read of the wrong kind reports WRONG_KIND, not INCOHERENT, even racing a writer");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-016");
+    Svc::StateBufferStoreTester tester;
+    tester.wrongKindLatestReadNotTornTest();
+}
+
+TEST(OffNominal, UnwrittenReadsSkipRead) {
+    COMMENT("Every read of an entry never stored to reports NOT_WRITTEN without reading it");
+    REQUIREMENT("REQ-STATEBUFFERSTORE-013");
+    Svc::StateBufferStoreTester tester;
+    tester.unwrittenReadsSkipReadTest();
+}
+
 TEST(Nominal, PerEntryDepth) {
     COMMENT("Each entry keeps its own configured depth, including the bounds");
     REQUIREMENT("REQ-STATEBUFFERSTORE-010");

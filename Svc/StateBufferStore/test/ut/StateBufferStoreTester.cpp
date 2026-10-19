@@ -31,6 +31,11 @@ constexpr I32 RACING_PUT_VALUE = 500;
 //! A kind byte no EntryKind uses, as a memory upset might leave it
 constexpr U8 CORRUPT_KIND = 9;
 
+//! StateBufferStore's KIND_VALUE and KIND_DATA, which are private to it, as
+//! an upset could flip one into the other
+constexpr U8 VALUE_KIND = 1;
+constexpr U8 DATA_KIND = 2;
+
 //! Memory identifier the component under test allocates under
 constexpr FwEnumStoreType TEST_MEM_ID = 0;
 
@@ -186,6 +191,16 @@ void StateBufferStoreTester::corruptKindDuringRead(void* context) {
     tester->component.utEntry(ENTRY_A).kind.store(CORRUPT_KIND);
 }
 
+void StateBufferStoreTester::flipToDataKindDuringRead(void* context) {
+    StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
+    tester->component.utEntry(ENTRY_A).kind.store(DATA_KIND);
+}
+
+void StateBufferStoreTester::flipToValueKindDuringRead(void* context) {
+    StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
+    tester->component.utEntry(ENTRY_B).kind.store(VALUE_KIND);
+}
+
 void StateBufferStoreTester::useCorrupted(Corruption corruption) {
     auto& blockA = this->component.utEntry(ENTRY_A);
     auto& blockB = this->component.utEntry(ENTRY_B);
@@ -206,9 +221,14 @@ void StateBufferStoreTester::useCorrupted(Corruption corruption) {
             blockA.data = nullptr;
             break;
         case Corruption::LATEST_VALUE_READ:
+            // Stored first: a read of an entry never stored to reads nothing
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
             blockA.latest = blockA.depth;
             break;
         case Corruption::LATEST_DATA_READ: {
+            U8 stored[] = {'d'};
+            Fw::Buffer in(stored, sizeof stored);
+            (void)this->invoke_to_putData(0, ENTRY_B, in, SbsStatus::OK);
             blockB.latest = blockB.depth;
             U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
             Fw::Buffer out(readBack, sizeof readBack);
@@ -227,7 +247,9 @@ void StateBufferStoreTester::useCorrupted(Corruption corruption) {
             return;
         case Corruption::INDEX_DURING_READ:
             // checkedEntry() sees a sound index; the hook corrupts it once the
-            // read is under way, and forced torn reads carry it to the warning
+            // read is under way, and forced torn reads carry it to the warning.
+            // Stored first: a read of an entry never stored to reads nothing
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
             this->component.m_utBeforeRead = &StateBufferStoreTester::corruptIndexDuringRead;
             this->component.m_utBeforeReadContext = this;
             this->component.m_utForceTornReads = StateBufferStoreCfg::MAX_READ_ITERATIONS;
@@ -253,6 +275,42 @@ void StateBufferStoreTester::useCorrupted(Corruption corruption) {
             Fw::Buffer data(bytes, sizeof bytes);
             FwSizeType sizeOut = 0;
             (void)this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut);
+            return;
+        }
+        case Corruption::KIND_FLIP_VALUE_READ:
+        case Corruption::KIND_FLIP_WATERMARK_READ:
+        case Corruption::KIND_FLIP_HISTORY_READ: {
+            // The read's kind check sees a value entry; the hook flips it to a
+            // valid but different kind before the snapshot copies it
+            this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
+            this->component.m_utBeforeRead = &StateBufferStoreTester::flipToDataKindDuringRead;
+            this->component.m_utBeforeReadContext = this;
+            if (corruption == Corruption::KIND_FLIP_VALUE_READ) {
+                break;
+            }
+            if (corruption == Corruption::KIND_FLIP_WATERMARK_READ) {
+                SbsMeasurement min;
+                SbsMeasurement max;
+                (void)this->invoke_to_getMinMax(0, ENTRY_A, min, max);
+                return;
+            }
+            U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
+            Fw::Buffer data(bytes, sizeof bytes);
+            FwSizeType sizeOut = 0;
+            (void)this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut);
+            return;
+        }
+        case Corruption::KIND_FLIP_DATA_READ: {
+            U8 stored[] = {'d'};
+            Fw::Buffer in(stored, sizeof stored);
+            (void)this->invoke_to_putData(0, ENTRY_B, in, SbsStatus::OK);
+            this->component.m_utBeforeRead = &StateBufferStoreTester::flipToValueKindDuringRead;
+            this->component.m_utBeforeReadContext = this;
+            U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+            Fw::Buffer out(readBack, sizeof readBack);
+            Fw::Time measTime;
+            FwSizeType sizeOut = 0;
+            (void)this->invoke_to_getData(0, ENTRY_B, out, measTime, Fw::Time(), sizeOut);
             return;
         }
     }
@@ -1157,6 +1215,92 @@ void StateBufferStoreTester::dataEntryKindCheckedFirstTest() {
     ASSERT_EQ(sizeOut, 0u);
 }
 
+void StateBufferStoreTester::wrongKindLatestReadNotTornTest() {
+    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(5)), 1);
+    U8 stored[] = {'d'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_B, in, SbsStatus::OK), SbsStatus::OK);
+    this->clearHistory();
+
+    // Every attempt would be torn, as if racing the entry's writer; the kind
+    // check comes first, so the wrong kind is reported and nothing is read
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    Fw::Time measTime;
+    FwSizeType sizeOut = 1;
+    this->component.m_utForceTornReads = StateBufferStoreCfg::MAX_READ_ITERATIONS;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_A, out, measTime, Fw::Time(), sizeOut), SbsStatus::WRONG_KIND);
+    ASSERT_EQ(sizeOut, 0u);
+    ASSERT_EQ(this->component.m_utForceTornReads, StateBufferStoreCfg::MAX_READ_ITERATIONS);
+
+    Fw::PolyType val;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_B, val, measTime, Fw::Time()), SbsStatus::WRONG_KIND);
+    ASSERT_EQ(this->component.m_utForceTornReads, StateBufferStoreCfg::MAX_READ_ITERATIONS);
+    this->component.m_utForceTornReads = 0;
+
+    ASSERT_EVENTS_SIZE(0);
+}
+
+void StateBufferStoreTester::unwrittenReadsSkipReadTest() {
+    // ENTRY_A is never stored to. Every attempt would be torn, as if racing a
+    // writer; an unclaimed entry is reported from its kind, without a read
+    this->component.m_utForceTornReads = StateBufferStoreCfg::MAX_READ_ITERATIONS;
+    const Fw::Time stale(TimeBase::TB_WORKSTATION_TIME, 5, 0);
+
+    // Outputs are reset as a read of the empty slot would leave them
+    Fw::PolyType val(static_cast<U32>(7));
+    Fw::Time measTime = stale;
+    ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_A, val, measTime, Fw::Time()), SbsStatus::NOT_WRITTEN);
+    ASSERT_FALSE(val.isU32());
+    ASSERT_EQ(measTime, Fw::ZERO_TIME);
+
+    U8 readBack[StateBufferStoreCfg::MAX_DATA_SIZE] = {};
+    Fw::Buffer out(readBack, sizeof readBack);
+    FwSizeType sizeOut = 1;
+    measTime = stale;
+    ASSERT_EQ(this->invoke_to_getData(0, ENTRY_A, out, measTime, Fw::Time(), sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(sizeOut, 0u);
+    ASSERT_EQ(measTime, Fw::ZERO_TIME);
+
+    // Watermarks report zeroed with NOT_WRITTEN validity, cleared or not
+    SbsMeasurement min(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
+    SbsMeasurement max(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(min.get_validity(), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(min.get_time(), Fw::ZERO_TIME);
+    ASSERT_EQ(max.get_validity(), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(max.get_time(), Fw::ZERO_TIME);
+    min.set(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
+    max.set(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
+    ASSERT_EQ(this->invoke_to_clearAndGetMinMax(0, ENTRY_A, min, max), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(min.get_validity(), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(max.get_validity(), SbsStatus::NOT_WRITTEN);
+
+    U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
+    Fw::Buffer data(bytes, sizeof bytes);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(sizeOut, 0u);
+    // The full-history read still judges its buffer first
+    Fw::Buffer oneRecord(bytes, RECORD_SIZE);
+    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, oneRecord, sizeOut), SbsStatus::INVALID_BUFFER_SIZE);
+    sizeOut = 1;
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 1, data, sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(sizeOut, 0u);
+    Fw::Buffer noRecord(bytes, RECORD_SIZE - 1);
+    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 1, noRecord, sizeOut), SbsStatus::NOT_WRITTEN);
+
+    // No read was attempted
+    ASSERT_EQ(this->component.m_utForceTornReads, StateBufferStoreCfg::MAX_READ_ITERATIONS);
+    this->component.m_utForceTornReads = 0;
+    ASSERT_EVENTS_SIZE(0);
+
+    // Still unclaimed, so either kind may yet claim it
+    U8 stored[] = {'d'};
+    Fw::Buffer in(stored, sizeof stored);
+    ASSERT_EQ(this->invoke_to_putData(0, ENTRY_A, in, SbsStatus::OK), SbsStatus::OK);
+}
+
 // ----------------------------------------------------------------------
 // Tests: configuration
 // ----------------------------------------------------------------------
@@ -1656,6 +1800,10 @@ void StateBufferStoreTester::corruptedEntryDeathTest() {
     ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::INDEX_DURING_READ), "StateBufferStore.cpp");
     ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND), "StateBufferStore.cpp");
     ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_DURING_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_FLIP_VALUE_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_FLIP_DATA_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_FLIP_WATERMARK_READ), "StateBufferStore.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::KIND_FLIP_HISTORY_READ), "StateBufferStore.cpp");
     ASSERT_DEATH_IF_SUPPORTED(this->useCorrupted(Corruption::TLM_VALIDITY), "StateBufferStore.cpp");
 
     // Uncorrupted, the same entries still work

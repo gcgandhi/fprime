@@ -4,9 +4,12 @@ Reusable integration tests for Svc.StateBufferStore's ground interface: the
 REPORT_WATERMARKS, CLEAR_WATERMARKS, and RESET_THROTTLES commands and the
 events they emit.
 
-No deployment in this repository instantiates the component yet, so these
-tests only run once a topology does. Map it in the deployment's
-int_config.json (see docs/user-manual/gds/reusable-integration-tests.md):
+No deployment in this repository instantiates the component, so these tests
+only run once a topology does. They have been run, and all passed, against a
+local, uncommitted topology (SbsTest) outside this repository: Svc.StateBufferStore
+with a producer and a consumer component on separate rate-group threads, and one
+telemetry-mapped value entry and one telemetry-mapped TYPE_DATA entry. Map it in
+the deployment's int_config.json (see docs/user-manual/gds/reusable-integration-tests.md):
 
     "Svc.StateBufferStore": "<instance mnemonic>",
     "Svc.StateBufferStore.quietEntry": "<value entry nothing writes during the test>",

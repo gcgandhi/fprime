@@ -75,7 +75,10 @@ static_assert(ATOMIC_BOOL_LOCK_FREE != 0, "std::atomic<bool> is never lock-free 
 
 static_assert(StateBufferStoreCfg::MAX_READ_ITERATIONS >= 1, "MAX_READ_ITERATIONS must be at least 1");
 static_assert(StateBufferStoreCfg::MIN_HISTORY_DEPTH >= 2, "REQ-STATEBUFFERSTORE-010 requires a depth of at least 2");
-static_assert(StateBufferStoreCfg::MIN_HISTORY_DEPTH <= StateBufferStoreCfg::MAX_HISTORY_DEPTH,
+// Each FPP constant is its own unnamed enum, and GCC rejects comparing two
+// different enum types (-Wenum-compare), so both are converted first
+static_assert(static_cast<FwSizeType>(StateBufferStoreCfg::MIN_HISTORY_DEPTH) <=
+                  static_cast<FwSizeType>(StateBufferStoreCfg::MAX_HISTORY_DEPTH),
               "MIN_HISTORY_DEPTH exceeds MAX_HISTORY_DEPTH");
 // History reads hold MAX_HISTORY_DEPTH serialized records on the calling
 // thread's stack, so the depth is capped to bound that cost: 64 records of
@@ -411,7 +414,8 @@ void StateBufferStore::HistorySnapshot::copy(const Entry& block) {
     // Reset per attempt: a torn attempt's failure must not survive into a
     // retry that proves coherent, or the caller's FW_ASSERT on it would fire
     this->serialized = true;
-    // A data entry's slots hold no value to serialize
+    // Reads proceed only on value entries, so only corruption reaches this,
+    // which readHistory then asserts on; a non-value slot holds no value to serialize
     if (not StateBufferStore::isValueKind(this->kind)) {
         return;
     }
@@ -431,8 +435,12 @@ void StateBufferStore::HistorySnapshot::copy(const Entry& block) {
         (void)::memset(recordBytes, 0, HISTORY_RECORD_SIZE);
         const SbsMeasurement measurement(slotMeas.time, slotMeas.validity, slotMeas.value);
         Fw::ExternalSerializeBuffer serializer(recordBytes, HISTORY_RECORD_SIZE);
-        // A torn copy may pair a newer count with an unwritten slot,
-        // so a failure is only an error once the read proves coherent
+        // Fails only for an untyped PolyType, which only a never-written slot
+        // holds (puts assert their values are typed). A coherent copy reads only
+        // stored slots, but a torn one can pair the stored count and latest slot a
+        // put has already advanced with the slot it has not yet filled. So a
+        // failure is recorded here, and readHistory asserts only once the read
+        // proves coherent
         if (serializer.serializeFrom(measurement) != Fw::FW_SERIALIZE_OK) {
             this->serialized = false;
         }
@@ -490,6 +498,25 @@ U8 StateBufferStore::checkedKind(U8 kind) {
     // past every kind check with nothing behind it.
     FW_ASSERT(kind < NUM_KINDS, static_cast<FwAssertArgType>(kind));
     return kind;
+}
+
+SbsStatus StateBufferStore::readableKind(const Entry& block, bool valueRead) {
+    // Kinds are never unclaimed, so the answer cannot be overtaken: an entry
+    // of the other kind stays so, and one found unclaimed was unwritten when
+    // the read began, even if a put claims it before the read returns.
+    // Deciding here means neither is read, so neither can be torn by a writer
+    // into an INCOHERENT report and a FailedReadCoherentData warning.
+    const U8 kind = StateBufferStore::checkedKind(block.kind.load(std::memory_order_acquire));
+    if (kind == KIND_UNSET) {
+        return SbsStatus::NOT_WRITTEN;
+    }
+    const bool valueKind = StateBufferStore::isValueKind(kind);
+    return (valueKind == valueRead) ? SbsStatus::OK : SbsStatus::WRONG_KIND;
+}
+
+void StateBufferStore::checkSnapshotKind(U8 kind, bool valueRead) {
+    const bool sameKind = valueRead ? StateBufferStore::isValueKind(kind) : StateBufferStore::isDataKind(kind);
+    FW_ASSERT(sameKind, static_cast<FwAssertArgType>(kind), static_cast<FwAssertArgType>(valueRead));
 }
 
 SbsStatus StateBufferStore::checkedTlmValidity(const Entry& block) {
@@ -645,9 +672,14 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
                                            SbsMeasurement& min,
                                            SbsMeasurement& max) {
     const bool clear = (operation == StateBufferStore_ReadOperation::CLEAR_AND_GET_MIN_MAX);
-    // Reject reading watermarks for DATA kind
-    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
-        return SbsStatus::WRONG_KIND;
+    // Decided before any clear is marked: an unwritten entry has no epoch to end
+    const SbsStatus readable = StateBufferStore::readableKind(block, true);
+    if (readable == SbsStatus::NOT_WRITTEN) {
+        StateBufferStore::reportNotWritten(min);
+        StateBufferStore::reportNotWritten(max);
+    }
+    if (readable != SbsStatus::OK) {
+        return readable;
     }
     // A clear that finds one already pending ends an epoch with no puts in it
     const bool alreadyCleared = clear and block.clearPending.exchange(true, std::memory_order_acq_rel);
@@ -665,10 +697,7 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
         }
         return SbsStatus::INCOHERENT;
     }
-    // Reject reading watermarks for a DATA kind
-    if (StateBufferStore::isDataKind(snapshot.kind)) {
-        return SbsStatus::WRONG_KIND;
-    }
+    StateBufferStore::checkSnapshotKind(snapshot.kind, true);
     reportWatermark(snapshot.min, snapshot.cleared, min);
     reportWatermark(snapshot.max, snapshot.cleared, max);
     return (snapshot.stored > 0) ? SbsStatus::OK : SbsStatus::NOT_WRITTEN;
@@ -676,10 +705,14 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
 
 void StateBufferStore::reportWatermark(const Measurement& source, bool cleared, SbsMeasurement& out) {
     if (cleared) {
-        out.set(Fw::Time(), SbsStatus::NOT_WRITTEN, Fw::PolyType());
+        StateBufferStore::reportNotWritten(out);
     } else {
         out.set(source.time, source.validity, source.value);
     }
+}
+
+void StateBufferStore::reportNotWritten(SbsMeasurement& out) {
+    out.set(Fw::ZERO_TIME, SbsStatus::NOT_WRITTEN, Fw::PolyType());
 }
 
 F64 StateBufferStore::toF64(const Fw::PolyType& value) {
@@ -744,10 +777,7 @@ SbsStatus StateBufferStore::readHistory(Entry& block,
     if (not this->coherentRead(block, operation, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
-    // Reject reading history for a DATA kind
-    if (StateBufferStore::isDataKind(snapshot.kind)) {
-        return SbsStatus::WRONG_KIND;
-    }
+    StateBufferStore::checkSnapshotKind(snapshot.kind, true);
     FW_ASSERT(snapshot.serialized);
     const FwSizeType bytes = snapshot.copied * HISTORY_RECORD_SIZE;
     if (bytes > 0) {
@@ -796,14 +826,21 @@ SbsStatus StateBufferStore::getValue_handler(FwIndexType portNum,
                                              Fw::Time& measTime,
                                              const Fw::Time& lastReadTime) {
     Entry& block = this->checkedEntry(entry);
+    const SbsStatus readable = StateBufferStore::readableKind(block, true);
+    if (readable == SbsStatus::NOT_WRITTEN) {
+        // As a read of the empty slot would report
+        val = Fw::PolyType();
+        measTime = Fw::ZERO_TIME;
+    }
+    if (readable != SbsStatus::OK) {
+        return readable;
+    }
 
     ValueSnapshot snapshot;
     if (not this->coherentRead(block, StateBufferStore_ReadOperation::GET_VALUE, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
-    if (StateBufferStore::isDataKind(snapshot.kind)) {
-        return SbsStatus::WRONG_KIND;
-    }
+    StateBufferStore::checkSnapshotKind(snapshot.kind, true);
     val = snapshot.measurement.value;
     measTime = snapshot.measurement.time;
     return StateBufferStore::latestStatus(snapshot.stored, snapshot.measurement, lastReadTime);
@@ -845,14 +882,20 @@ SbsStatus StateBufferStore::getData_handler(FwIndexType portNum,
                                             FwSizeType& sizeOut) {
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
+    const SbsStatus readable = StateBufferStore::readableKind(block, false);
+    if (readable == SbsStatus::NOT_WRITTEN) {
+        // As a read of the empty slot would report; sizeOut is already 0
+        measTime = Fw::ZERO_TIME;
+    }
+    if (readable != SbsStatus::OK) {
+        return readable;
+    }
 
     DataSnapshot snapshot;
     if (not this->coherentRead(block, StateBufferStore_ReadOperation::GET_DATA, snapshot)) {
         return SbsStatus::INCOHERENT;
     }
-    if (StateBufferStore::isValueKind(snapshot.kind)) {
-        return SbsStatus::WRONG_KIND;
-    }
+    StateBufferStore::checkSnapshotKind(snapshot.kind, false);
     const Measurement& measurement = snapshot.measurement;
     // A null buffer is refused like a short one, but only when there is
     // something to copy; Fw::Buffer does not stop a null pointer with a size
@@ -893,15 +936,20 @@ SbsStatus StateBufferStore::getHistory_handler(FwIndexType portNum,
                                                FwSizeType& sizeOut) {
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
-    // Kinds are never unclaimed, so a data entry is refused before its buffer is judged
-    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
-        return SbsStatus::WRONG_KIND;
+    // A data entry is refused before its buffer is judged
+    const SbsStatus readable = StateBufferStore::readableKind(block, true);
+    if (readable == SbsStatus::WRONG_KIND) {
+        return readable;
     }
     const FwSizeType required = block.depth * HISTORY_RECORD_SIZE;
     // Strict: the full-history read either delivers the whole history or
-    // nothing, so a caller cannot mistake a partial dump for a complete one
+    // nothing, so a caller cannot mistake a partial dump for a complete one.
+    // Judged ahead of NOT_WRITTEN, as for an entry claimed but not yet written
     if (data.getSize() < required) {
         return SbsStatus::INVALID_BUFFER_SIZE;
+    }
+    if (readable != SbsStatus::OK) {
+        return readable;
     }
     return this->readHistory(block, block.depth, StateBufferStore_ReadOperation::GET_HISTORY, data, sizeOut);
 }
@@ -913,9 +961,10 @@ SbsStatus StateBufferStore::getNHistory_handler(FwIndexType portNum,
                                                 FwSizeType& sizeOut) {
     sizeOut = 0;
     Entry& block = this->checkedEntry(entry);
-    // Kinds are never unclaimed, so a data entry is refused before its request is judged
-    if (StateBufferStore::isDataKind(block.kind.load(std::memory_order_acquire))) {
-        return SbsStatus::WRONG_KIND;
+    // Decided before the request is judged; NOT_WRITTEN outranks a short buffer here
+    const SbsStatus readable = StateBufferStore::readableKind(block, true);
+    if (readable != SbsStatus::OK) {
+        return readable;
     }
 
     // Zero requests the entry's whole depth, and so does a request deeper than
@@ -956,6 +1005,7 @@ void StateBufferStore::tlmIn_handler(FwIndexType portNum, FwChanIdType id, Fw::T
             Entry& block = this->checkedEntry(mapping.get_entry());
             // configure() fixed the kind from the mapping, so it alone decides the path
             const U8 kind = block.kind.load(std::memory_order_relaxed);
+            // setTlmValidity port must be called separatly to change the tlm validity
             const SbsStatus validity = StateBufferStore::checkedTlmValidity(block);
             if (kind == KIND_TLM_DATA) {
                 if (val.getSize() > StateBufferStoreCfg::MAX_DATA_SIZE) {
@@ -1014,13 +1064,15 @@ void StateBufferStore::REPORT_WATERMARKS_cmdHandler(FwOpcodeType opCode,
     SbsMeasurement min;
     SbsMeasurement max;
     Entry& block = this->checkedEntry(entry);
+
+    // Read the watermarks and fail the command if needed
     const SbsStatus status = this->readWatermarks(block, StateBufferStore_ReadOperation::REPORT_WATERMARKS, min, max);
     if (status == SbsStatus::WRONG_KIND) {
         this->log_WARNING_LO_ReportWatermarksRejected(entry, StateBufferStore_WatermarkRejection::DATA_ENTRY);
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
     }
-    // readWatermarks has already emitted FailedReadCoherentData naming this command
+    // Note: readWatermarks has already emitted FailedReadCoherentData naming this command
     if (status == SbsStatus::INCOHERENT) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
@@ -1045,6 +1097,7 @@ void StateBufferStore::CLEAR_WATERMARKS_cmdHandler(FwOpcodeType opCode,
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
+    // Try to clear the watermarks and give WARNING if it failed
     if (StateBufferStore::clearWatermarks(this->checkedEntry(entry)) == SbsStatus::WRONG_KIND) {
         this->log_WARNING_LO_ClearWatermarksRejected(entry, StateBufferStore_WatermarkRejection::DATA_ENTRY);
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);

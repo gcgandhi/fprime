@@ -37,8 +37,8 @@ derives from in the heritage module's specification.
 | REQ-STATEBUFFERSTORE-002 | HER-0005, .0006 | `Svc::StateBufferStore` shall provide a synchronous interface to store a structure or fixed-length string for a single entry, recording a caller-supplied validity of `OK` or `INVALID` with it and refusing any other validity with `INVALID_VALIDITY`, storing nothing. | Unit Test |
 | REQ-STATEBUFFERSTORE-003 | HER-0007 | `Svc::StateBufferStore` shall provide a synchronous interface to get the latest primitive measurement for an entry, reporting its value, time, and validity. | Unit Test |
 | REQ-STATEBUFFERSTORE-004 | HER-0008, .0009 | `Svc::StateBufferStore` shall provide a synchronous interface to get the latest structure or string measurement for an entry, and shall report `INVALID_BUFFER_SIZE` without copying when the supplied buffer is too small. | Unit Test |
-| REQ-STATEBUFFERSTORE-005 | HER-0011 | `Svc::StateBufferStore` shall record the minimum and maximum value stored for each entry, excluding floating-point NaN, each with the time and validity in force when it was recorded, and shall provide interfaces to report them over a port and as an event. | Unit Test |
-| REQ-STATEBUFFERSTORE-006 | HER-0014 | `Svc::StateBufferStore` shall provide an interface to clear an entry's watermarks, after which the next stored value becomes both watermarks. | Unit Test |
+| REQ-STATEBUFFERSTORE-005 | HER-0011 | `Svc::StateBufferStore` shall record the minimum and maximum value stored for each entry, excluding floating-point NaN, each with the time and validity in force when it was recorded, and shall provide interfaces to report them over a port and as an event. | Unit Test, Integration Test |
+| REQ-STATEBUFFERSTORE-006 | HER-0014 | `Svc::StateBufferStore` shall provide an interface to clear an entry's watermarks, after which the next stored value becomes both watermarks. | Unit Test, Integration Test |
 | REQ-STATEBUFFERSTORE-007 | HER-0013 | `Svc::StateBufferStore` shall provide an interface that reports an entry's watermarks and then clears them in one operation. | Unit Test |
 | REQ-STATEBUFFERSTORE-008 | HER-0010 | `Svc::StateBufferStore` shall provide a synchronous interface to get a value entry's stored measurement history in chronological order as serialized `SbsMeasurement` records, and shall report `INVALID_BUFFER_SIZE` without copying when the supplied buffer cannot hold the entry's full depth. | Unit Test |
 | REQ-STATEBUFFERSTORE-009 | HER-0100 | `Svc::StateBufferStore` shall provide a synchronous interface to get a value entry's most recent N stored measurements in chronological order, where N of zero or N exceeding the entry's depth requests the entry's full depth, and shall copy as many whole measurements as the supplied buffer holds when it cannot hold N, reporting `INVALID_BUFFER_SIZE` without copying when it cannot hold one and the entry has been written. | Unit Test |
@@ -48,10 +48,10 @@ derives from in the heritage module's specification.
 | REQ-STATEBUFFERSTORE-013 | derived | `Svc::StateBufferStore` shall report `NOT_WRITTEN` for an entry never stored to, and `NOT_FRESH` when the measurement has not changed since the caller's previous read; a caller supplying no previous read time (`Fw::ZERO_TIME`) shall not be checked for freshness. | Unit Test |
 | REQ-STATEBUFFERSTORE-014 | derived (#5067) | `Svc::StateBufferStore` shall detect a measurement, watermark, or history read concurrently with a write, retry the read up to a configured number of attempts, and on exhaustion emit a warning-high event identifying the read, throttled per §3.11, and report `INCOHERENT` without copying out the read data. | Unit Test |
 | REQ-STATEBUFFERSTORE-015 | derived | `Svc::StateBufferStore` shall perform every store and read operation without dynamic memory allocation after configuration and in bounded time. | Inspection |
-| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, or as a value or data entry written only through `tlmIn` when `configure()` maps a telemetry channel to it, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it and for any put to a telemetry-mapped entry. | Unit Test |
-| REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type or, for a channel mapped as serialized data, as its serialized bytes, and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, throttled per §3.11, storing nothing, when a mapped value does not decode as its type or serialized data exceeds the configured maximum data size. | Unit Test |
-| REQ-STATEBUFFERSTORE-018 | derived | `Svc::StateBufferStore` shall provide a command that resets the throttles of its throttled warning events, so that a throttled warning is reported again when its condition recurs. | Unit Test |
-| REQ-STATEBUFFERSTORE-019 | derived | `Svc::StateBufferStore` shall reject a watermark command whose entry argument names no entry with `VALIDATION_ERROR`, reporting the rejection as an event. | Unit Test |
+| REQ-STATEBUFFERSTORE-016 | derived | `Svc::StateBufferStore` shall fix each entry as a value or data entry on its first store, or as a value or data entry written only through `tlmIn` when `configure()` maps a telemetry channel to it, and shall report `WRONG_KIND`, storing and copying nothing, for any operation of the other kind on it and for any put to a telemetry-mapped entry. | Unit Test, Integration Test |
+| REQ-STATEBUFFERSTORE-017 | derived (#5067) | `Svc::StateBufferStore` shall accept telemetry on an `Fw.Tlm` port, storing each channel named in its configured mapping table in the mapped entry, decoded as the mapped primitive type or, for a channel mapped as serialized data, as its serialized bytes, and time tagged with the sender's time tag; shall ignore unmapped channels; and shall emit a warning event, throttled per §3.11, storing nothing, when a mapped value does not decode as its type or serialized data exceeds the configured maximum data size. | Unit Test, Integration Test |
+| REQ-STATEBUFFERSTORE-018 | derived | `Svc::StateBufferStore` shall provide a command that resets the throttles of its throttled warning events, so that a throttled warning is reported again when its condition recurs. | Unit Test, Integration Test |
+| REQ-STATEBUFFERSTORE-019 | derived | `Svc::StateBufferStore` shall reject a watermark command whose entry argument names no entry with `VALIDATION_ERROR`, reporting the rejection as an event. | Unit Test, Integration Test |
 | REQ-STATEBUFFERSTORE-020 | derived (HER-0004, .0005) | `Svc::StateBufferStore` shall provide a synchronous interface to set the validity, `OK` or `INVALID`, recorded with each later sample of a telemetry-mapped entry until set again, `OK` until first set, and shall report `WRONG_KIND` for an entry not mapped to telemetry and `INVALID_VALIDITY` for any other validity, changing nothing. | Unit Test |
 
 Heritage requirements HER-0001, .0002, and .0003 govern shared-memory
@@ -140,6 +140,26 @@ sequence lock. A reader may therefore copy bytes while they are being written;
 the counter guarantees such a copy is discarded, and every use of copied data
 that could fault (the payload length, serializing a value) is bounded or
 deferred until the copy is known to be coherent.
+
+**Lockless versus guarded on flight processors.** Making puts and reads
+`guarded` would trade occasional `INCOHERENT` reads for occasional blocking.
+Estimates scaled from a desktop benchmark, not measured on flight hardware:
+
+- **Cost.** A put or read is a few hundred instructions, roughly 3–6 µs on a
+  RAD750- or LEON-class processor. An uncontended RTOS mutex take/give would
+  add roughly 1–3 µs to each.
+- **Scope.** A guarded port locks the single component mutex, so callers of
+  unrelated entries would queue on one another. The coherency counter is per
+  entry.
+- **Failure rate.** A read fails only when every attempt overlaps a write of
+  its entry. The rate is on the order of the writer's duty cycle: write time
+  times write rate, about 5e-5 for a 10 Hz writer.
+- **Single core.** A reader that preempts its writer mid-write fails every
+  attempt (§6), where a guarded read would block until the write finishes, with
+  priority inheritance, and then succeed. A writer that preempts its reader
+  costs the reader only one retry.
+- **Multicore.** Readers never block and never contend with one another,
+  whereas guarded readers would serialize.
 
 ### 3.3 Watermarks and `Fw::PolyType` comparison
 
@@ -239,7 +259,15 @@ Three heritage behaviors were deliberately changed:
   channel is mapped to it (a data entry for `TYPE_DATA`, otherwise a value
   entry), and every operation of the other kind —
   including the puts, which therefore return `SbsStatus` — reports `WRONG_KIND`
-  and changes nothing. Watermarks and history are value-entry operations; a data
+  and changes nothing. Because a kind, once fixed, never changes, every read
+  decides from the kind before reading: an entry of the other kind reports
+  `WRONG_KIND`, and an entry never claimed, so never stored to, reports
+  `NOT_WRITTEN`, with outputs as a read of its empty slot would leave them.
+  Neither is read, so a writer racing the read cannot turn either into
+  `INCOHERENT` and a `FailedReadCoherentData` warning. A read that proceeds
+  then asserts its snapshot's kind is unchanged, which only corruption can
+  break. `getHistory` alone still judges its buffer ahead of `NOT_WRITTEN`, as
+  its port description in `StateBufferStorePorts.fpp` specifies. Watermarks and history are value-entry operations; a data
   entry's history is kept for coherency but is not readable. A
   telemetry-mapped entry also refuses `putValue`, keeping `tlmIn` its only
   writer.
@@ -596,8 +624,12 @@ unconnected stamps every measurement with zero time.
   component enforce §3.5's privilege tier itself rather than relying on wiring.
 - Topology integration. No deployment in this repository instantiates this
   component (nor `Svc::PolyDb`), so the reusable integration tests in
-  `test/int/test_StateBufferStore.py` do not run yet. Once a deployment
-  instantiates it, map the component in that deployment's `int_config.json`
+  `test/int/test_StateBufferStore.py` are not run by CI. They have been run, and
+  all passed, against a local, uncommitted topology outside this repository:
+  the component with a producer and a consumer on separate rate-group threads,
+  one telemetry-mapped value entry, and one telemetry-mapped `TYPE_DATA`
+  entry. To run them against a deployment, map the component in that
+  deployment's `int_config.json`
   ([Reusable Integration Tests](../../../docs/user-manual/gds/reusable-integration-tests.md))
   and pass the test directory to pytest:
 
@@ -623,14 +655,15 @@ unconnected stamps every measurement with zero time.
   | `test_data_entry_rejected` | REQ-STATEBUFFERSTORE-016, -017 (`TYPE_DATA` entry kind) |
 
   The remaining requirements concern the port interface and are covered by
-  unit tests; once the tests have run against a deployment, add "Integration
-  Test" to the Verification column of the requirements they cover.
+  unit tests. The Verification column lists "Integration Test" for the
+  requirements above on the strength of the local run; a deployment in this
+  repository would make that repeatable.
 
 ## 8. Unit test coverage
 
-The unit tests cover 97% of the lines of `StateBufferStore.cpp` (522 of 533)
-and every function. gcovr counts 55.7% of branches across the component's
-source and header (1022 of 1834); most of the remainder are the failure branches
+The unit tests cover 98% of the lines of `StateBufferStore.cpp` (599 of 609)
+and every function in it. gcovr counts 56.0% of branches across the component's
+source and header (1111 of 1984); most of the remainder are the failure branches
 of `FW_ASSERT`s and of code generated by the compiler, in line with comparable
 components such as `Svc::TimeConverter`.
 
@@ -638,9 +671,8 @@ The uncovered lines are:
 
 - Paths reached only when a writer interleaves with a reader on another thread,
   which a single-threaded test cannot arrange: clamping a torn payload size,
-  a history serialization that fails on a torn copy, and an entry whose kind is
-  claimed as data during a watermark or history read, or as a value entry
-  between a data put's kind check and its claim. The retry and
+  a history serialization that fails on a torn copy, and an entry claimed as a
+  value entry between a data put's kind check and its claim. The retry and
   `INCOHERENT` paths themselves are covered through a test-only hook that
   forces torn reads.
 - The `default` case of the telemetry decode switch, unreachable because
@@ -648,11 +680,15 @@ The uncovered lines are:
   asserts on construction from an undefined value.
 - The closing lines of `getMinMax_handler` and `clearAndGetMinMax_handler`,
   which gcov reports as unexecuted although both handlers are exercised.
+- A history snapshot's guard against copying from a non-value entry, which
+  only a corrupted kind reaches; the death test that reaches it runs in a
+  child process, which the figures do not count.
 
 The assertion paths — use before `configure()`, configuring twice, an untyped
 value, a malformed telemetry table, and an entry control block corrupted after
 `configure()` (depth, index, ring and payload pointers, latest slot, stored
-count, kind, telemetry validity) — are verified by death tests. The corruption checks guard against
+count, kind, telemetry validity), including a kind flipped mid-read to the
+other valid kind for each read — are verified by death tests. The corruption checks guard against
 memory upsets such as radiation-induced bit flips. Some cannot be reached once
 the others hold, so they are not tested: the slot indices computed by
 `Fw::CircularIndex`, which reduces them modulo the depth (the writer's new slot
@@ -698,3 +734,6 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-14 | `REPORT_WATERMARKS` on an unwritten or cleared entry documented and tested: zeros with `NOT_WRITTEN` validity, `OK` response |
 | 2026-10-14 | `setTlmValidity` port: a telemetry producer sets the validity `tlmIn` records with later samples, rather than always `OK` (REQ-020) |
 | 2026-10-14 | Telemetry validity documented as the producer's state, in force until changed; `WatermarkReport` reports it |
+| 2026-10-17 | Lockless versus guarded trade-off on flight processors summarized |
+| 2026-10-19 | Reusable integration tests run against a local topology; Verification column and deferred-work item updated |
+| 2026-10-19 | Every read decides `WRONG_KIND` and, for an entry never stored to, `NOT_WRITTEN` from the entry kind before reading, so neither can be reported `INCOHERENT` by a read racing a writer; a snapshot of another kind asserts; coverage figures refreshed |
