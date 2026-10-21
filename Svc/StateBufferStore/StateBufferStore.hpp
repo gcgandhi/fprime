@@ -19,6 +19,8 @@
 namespace Svc {
 
 class StateBufferStore final : public StateBufferStoreComponentBase {
+    friend class StateBufferStoreTester;
+
   public:
     // ----------------------------------------------------------------------
     // Component construction and destruction
@@ -128,16 +130,22 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
         void copy(const Entry& block);
     };
 
+    //! How a watermark read relates to the clear it may make
+    enum class ClearRole : U8 {
+        NONE,       //!< the read does not clear
+        OWNS,       //!< the read's clear ends the current epoch
+        REDUNDANT,  //!< a clear was already pending, so the epoch it ends is empty
+    };
+
     //! An entry's watermarks, as copied by one read attempt
     struct WatermarkSnapshot {
-        WatermarkSnapshot(bool clearIn, bool alreadyClearedIn) : clear(clearIn), alreadyCleared(alreadyClearedIn) {}
-        const bool clear;           //!< in: whether this read clears the watermarks
-        const bool alreadyCleared;  //!< in: whether a clear was already pending before this read's
-        Measurement min;            //!< the minimum to report
-        Measurement max;            //!< the maximum to report
-        bool cleared = false;       //!< whether the watermarks read back as cleared
-        FwSizeType stored = 0;      //!< measurements stored
-        U8 kind = KIND_UNSET;       //!< the entry's kind
+        explicit WatermarkSnapshot(ClearRole roleIn) : role(roleIn) {}
+        const ClearRole role;   //!< in: this read's part in clearing the watermarks
+        Measurement min;        //!< the minimum to report
+        Measurement max;        //!< the maximum to report
+        bool cleared = false;   //!< whether the watermarks read back as cleared
+        FwSizeType stored = 0;  //!< measurements stored
+        U8 kind = KIND_UNSET;   //!< the entry's kind
         void copy(const Entry& block);
     };
 
@@ -406,7 +414,6 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     bool m_initialized;
 
 #ifdef BUILD_UT
-  public:
     //! Test-only hook forcing the next this many read attempts to report a
     //! torn entry, exercising the retry and INCOHERENT paths
     U32 m_utForceTornReads = 0;
@@ -417,12 +424,6 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
 
     //! Context passed to m_utBeforeRead
     void* m_utBeforeReadContext = nullptr;
-
-    //! Test-only access to an entry's control block, letting death tests
-    //! simulate memory corruption of fields fixed at configuration
-    Entry& utEntry(Svc::StateBufferStoreCfg::StateEntry::T entry) {
-        return this->m_entries[static_cast<FwSizeType>(entry)];
-    }
 #endif
 };
 

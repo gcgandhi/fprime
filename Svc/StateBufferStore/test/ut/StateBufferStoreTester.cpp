@@ -31,11 +31,6 @@ constexpr I32 RACING_PUT_VALUE = 500;
 //! A kind byte no EntryKind uses, as a memory upset might leave it
 constexpr U8 CORRUPT_KIND = 9;
 
-//! StateBufferStore's KIND_VALUE and KIND_DATA, which are private to it, as
-//! an upset could flip one into the other
-constexpr U8 VALUE_KIND = 1;
-constexpr U8 DATA_KIND = 2;
-
 //! Memory identifier the component under test allocates under
 constexpr FwEnumStoreType TEST_MEM_ID = 0;
 
@@ -183,27 +178,27 @@ void StateBufferStoreTester::putDuringRead(void* context) {
 
 void StateBufferStoreTester::corruptIndexDuringRead(void* context) {
     StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
-    tester->component.utEntry(ENTRY_A).index = StateBufferStoreCfg::StateEntry::NUM_ENTRIES;
+    tester->component.m_entries[ENTRY_A].index = StateBufferStoreCfg::StateEntry::NUM_ENTRIES;
 }
 
 void StateBufferStoreTester::corruptKindDuringRead(void* context) {
     StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
-    tester->component.utEntry(ENTRY_A).kind.store(CORRUPT_KIND);
+    tester->component.m_entries[ENTRY_A].kind.store(CORRUPT_KIND);
 }
 
 void StateBufferStoreTester::flipToDataKindDuringRead(void* context) {
     StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
-    tester->component.utEntry(ENTRY_A).kind.store(DATA_KIND);
+    tester->component.m_entries[ENTRY_A].kind.store(StateBufferStore::KIND_DATA);
 }
 
 void StateBufferStoreTester::flipToValueKindDuringRead(void* context) {
     StateBufferStoreTester* const tester = static_cast<StateBufferStoreTester*>(context);
-    tester->component.utEntry(ENTRY_B).kind.store(VALUE_KIND);
+    tester->component.m_entries[ENTRY_B].kind.store(StateBufferStore::KIND_VALUE);
 }
 
 void StateBufferStoreTester::useCorrupted(Corruption corruption) {
-    auto& blockA = this->component.utEntry(ENTRY_A);
-    auto& blockB = this->component.utEntry(ENTRY_B);
+    auto& blockA = this->component.m_entries[ENTRY_A];
+    auto& blockB = this->component.m_entries[ENTRY_B];
     switch (corruption) {
         case Corruption::DEPTH_ZERO:
             blockA.depth = 0;
@@ -258,7 +253,7 @@ void StateBufferStoreTester::useCorrupted(Corruption corruption) {
             blockA.kind.store(CORRUPT_KIND);
             break;
         case Corruption::TLM_VALIDITY: {
-            this->component.utEntry(ENTRY_TLM_U32).tlmValidity.store(static_cast<U8>(SbsStatus::NOT_FRESH));
+            this->component.m_entries[ENTRY_TLM_U32].tlmValidity.store(static_cast<U8>(SbsStatus::NOT_FRESH));
             Fw::Time tag(TimeBase::TB_WORKSTATION_TIME, 70, 0);
             Fw::TlmBuffer u32Value;
             (void)u32Value.serializeFrom(static_cast<U32>(1));
@@ -483,6 +478,8 @@ void StateBufferStoreTester::watermarkClearTest() {
     this->put(ENTRY_A, Fw::PolyType(static_cast<I32>(-5)), 2);
 
     ASSERT_EQ(this->invoke_to_clearMinMax(0, ENTRY_A), SbsStatus::OK);
+    const auto& block = this->component.m_entries[ENTRY_A];
+    ASSERT_TRUE(block.clearPending.load());
 
     SbsMeasurement min;
     SbsMeasurement max;
@@ -490,10 +487,15 @@ void StateBufferStoreTester::watermarkClearTest() {
     // While cleared, watermarks read back as never written
     ASSERT_EQ(min.get_validity(), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(max.get_validity(), SbsStatus::NOT_WRITTEN);
+    // A plain read leaves the clear pending
+    ASSERT_TRUE(block.clearPending.load());
 
     // The next put reseeds both from that single value, discarding the old
     // extremes rather than comparing against them
     this->put(ENTRY_A, Fw::PolyType(static_cast<I32>(100)), 3);
+    ASSERT_FALSE(block.clearPending.load());
+    ASSERT_EQ(static_cast<I32>(block.retiredMin.value), -5);
+    ASSERT_EQ(static_cast<I32>(block.retiredMax.value), 10);
     ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
     ASSERT_EQ(static_cast<I32>(min.get_value()), 100);
     ASSERT_EQ(static_cast<I32>(max.get_value()), 100);
@@ -551,6 +553,10 @@ void StateBufferStoreTester::historyWrapTest() {
     for (FwSizeType i = 0; i < writes; i++) {
         this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(i + 1)), static_cast<U32>(i + 1));
     }
+    // latest starts at slot 0 and each put advances it before writing
+    const auto& block = this->component.m_entries[ENTRY_A];
+    ASSERT_EQ(block.stored, DEPTH);
+    ASSERT_EQ(block.latest, writes % DEPTH);
 
     U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
     Fw::Buffer data(bytes, sizeof bytes);
@@ -994,21 +1000,33 @@ void StateBufferStoreTester::historyPartialTest() {
     Fw::Buffer data(bytes, sizeof bytes);
     FwSizeType sizeOut = 0;
 
+    // The deepest entry, so that the puts below leave its ring partly empty
+    const StateBufferStoreCfg::StateEntry::T entry = ENTRY_MAX_DEPTH;
+    constexpr FwSizeType PUTS = 2;
+    static_assert(PUTS < StateBufferStoreCfg::MAX_HISTORY_DEPTH, "the ring must not fill");
+
     // Never written: nothing to report
-    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(this->invoke_to_getHistory(0, entry, data, sizeOut), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(sizeOut, 0u);
 
     // Fewer measurements than the depth: unwritten slots are not reported
-    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(1)), 1);
-    this->put(ENTRY_A, Fw::PolyType(static_cast<U32>(2)), 2);
-    ASSERT_EQ(this->invoke_to_getHistory(0, ENTRY_A, data, sizeOut), SbsStatus::OK);
-    ASSERT_EQ(sizeOut, 2u * RECORD_SIZE);
-    ASSERT_EQ(static_cast<U32>(this->readRecord(data, 0).get_value()), 1u);
-    ASSERT_EQ(static_cast<U32>(this->readRecord(data, 1).get_value()), 2u);
+    for (FwSizeType i = 0; i < PUTS; i++) {
+        this->put(entry, Fw::PolyType(static_cast<U32>(i + 1)), static_cast<U32>(i + 1));
+    }
+    ASSERT_EQ(this->invoke_to_getHistory(0, entry, data, sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, PUTS * RECORD_SIZE);
+    for (FwSizeType i = 0; i < PUTS; i++) {
+        ASSERT_EQ(static_cast<U32>(this->readRecord(data, i).get_value()), static_cast<U32>(i + 1)) << "record " << i;
+    }
 
-    // An N read asking for more than was stored gets only what was stored
-    ASSERT_EQ(this->invoke_to_getNHistory(0, ENTRY_A, 3, data, sizeOut), SbsStatus::OK);
-    ASSERT_EQ(sizeOut, 2u * RECORD_SIZE);
+    // An N read asking for more than was stored gets only what was stored.
+    // Cleared first, so records left by the read above cannot pass for its own
+    ::memset(bytes, 0, sizeof bytes);
+    ASSERT_EQ(this->invoke_to_getNHistory(0, entry, PUTS + 1, data, sizeOut), SbsStatus::OK);
+    ASSERT_EQ(sizeOut, PUTS * RECORD_SIZE);
+    for (FwSizeType i = 0; i < PUTS; i++) {
+        ASSERT_EQ(static_cast<U32>(this->readRecord(data, i).get_value()), static_cast<U32>(i + 1)) << "record " << i;
+    }
 }
 
 void StateBufferStoreTester::historyRecordFormatTest() {
@@ -1121,6 +1139,12 @@ void StateBufferStoreTester::clearAndGetRacingPutTest() {
     SbsMeasurement max;
     ASSERT_EQ(this->invoke_to_clearAndGetMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
 
+    // The racing put consumed the clear and retired the epoch it ended
+    const auto& block = this->component.m_entries[ENTRY_A];
+    ASSERT_FALSE(block.clearPending.load());
+    ASSERT_EQ(static_cast<I32>(block.retiredMin.value), 3);
+    ASSERT_EQ(static_cast<I32>(block.retiredMax.value), 90);
+
     // The epoch the clear ended is still what gets reported
     ASSERT_EQ(static_cast<I32>(min.get_value()), 3);
     ASSERT_EQ(static_cast<I32>(max.get_value()), 90);
@@ -1145,6 +1169,7 @@ void StateBufferStoreTester::watermarkTornReadTest() {
 
     // The torn clear-and-get withdrew its clear, so the watermarks it failed
     // to report are still held
+    ASSERT_FALSE(this->component.m_entries[ENTRY_A].clearPending.load());
     ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::OK);
     ASSERT_EQ(static_cast<I32>(min.get_value()), 1);
     ASSERT_EQ(static_cast<I32>(max.get_value()), 1);
@@ -1268,13 +1293,19 @@ void StateBufferStoreTester::unwrittenReadsSkipReadTest() {
     ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_A, min, max), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(min.get_validity(), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(min.get_time(), Fw::ZERO_TIME);
+    ASSERT_FALSE(min.get_value().isU32());
     ASSERT_EQ(max.get_validity(), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(max.get_time(), Fw::ZERO_TIME);
+    ASSERT_FALSE(max.get_value().isU32());
     min.set(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
     max.set(stale, SbsStatus::OK, Fw::PolyType(static_cast<U32>(1)));
     ASSERT_EQ(this->invoke_to_clearAndGetMinMax(0, ENTRY_A, min, max), SbsStatus::NOT_WRITTEN);
     ASSERT_EQ(min.get_validity(), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(min.get_time(), Fw::ZERO_TIME);
+    ASSERT_FALSE(min.get_value().isU32());
     ASSERT_EQ(max.get_validity(), SbsStatus::NOT_WRITTEN);
+    ASSERT_EQ(max.get_time(), Fw::ZERO_TIME);
+    ASSERT_FALSE(max.get_value().isU32());
 
     U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
     Fw::Buffer data(bytes, sizeof bytes);
@@ -1314,6 +1345,14 @@ void StateBufferStoreTester::perEntryDepthTest() {
     ASSERT_EQ(depths[ENTRY_MAX_DEPTH], static_cast<FwSizeType>(StateBufferStoreCfg::MAX_HISTORY_DEPTH));
     ASSERT_NE(depths[ENTRY_MIN_DEPTH], depths[ENTRY_MAX_DEPTH]);
 
+    // The one allocation holds every entry's ring and payload slots (SDD §4)
+    FwSizeType expectedMemSize = 0;
+    for (FwSizeType i = 0; i < StateBufferStoreCfg::StateEntry::NUM_ENTRIES; i++) {
+        ASSERT_EQ(this->component.m_entries[i].depth, depths[i]);
+        expectedMemSize += depths[i] * (sizeof(StateBufferStore::Measurement) + StateBufferStoreCfg::MAX_DATA_SIZE);
+    }
+    ASSERT_EQ(this->component.m_memSize, expectedMemSize);
+
     const StateBufferStoreCfg::StateEntry::T entries[] = {ENTRY_MIN_DEPTH, ENTRY_A, ENTRY_MAX_DEPTH};
     for (const StateBufferStoreCfg::StateEntry::T entry : entries) {
         const FwSizeType depth = depths[entry];
@@ -1321,6 +1360,8 @@ void StateBufferStoreTester::perEntryDepthTest() {
         for (FwSizeType i = 0; i <= depth; i++) {
             this->put(entry, Fw::PolyType(static_cast<U32>(i + 1)), static_cast<U32>(i + 1));
         }
+        ASSERT_EQ(this->component.m_entries[entry].stored, depth);
+        ASSERT_EQ(this->component.m_entries[entry].latest, (depth + 1) % depth);
 
         U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
         FwSizeType sizeOut = 0;
@@ -1630,6 +1671,15 @@ void StateBufferStoreTester::tlmValidityTest() {
     ASSERT_EQ(second.serializeFrom(static_cast<U32>(6)), Fw::FW_SERIALIZE_OK);
     this->invoke_to_tlmIn(0, TLM_CHAN_U32, laterTag, second);
     ASSERT_EQ(this->invoke_to_getValue(0, ENTRY_TLM_U32, value, measTime, Fw::Time()), SbsStatus::OK);
+
+    // Each watermark keeps the validity of the sample that set it
+    ASSERT_EQ(this->invoke_to_getMinMax(0, ENTRY_TLM_U32, min, max), SbsStatus::OK);
+    ASSERT_EQ(static_cast<U32>(min.get_value()), 5u);
+    ASSERT_EQ(min.get_time(), tag);
+    ASSERT_EQ(min.get_validity(), SbsStatus::INVALID);
+    ASSERT_EQ(static_cast<U32>(max.get_value()), 6u);
+    ASSERT_EQ(max.get_time(), laterTag);
+    ASSERT_EQ(max.get_validity(), SbsStatus::OK);
 
     U8 bytes[RECORD_SIZE * StateBufferStoreCfg::MAX_HISTORY_DEPTH] = {};
     Fw::Buffer data(bytes, sizeof bytes);

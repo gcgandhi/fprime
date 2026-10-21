@@ -225,7 +225,11 @@ void StateBufferStore::configure(FwEnumStoreType memId,
         }
     }
     // Second pass: cursor now sits past every ring, so hand each entry its
-    // depth * MAX_DATA_SIZE byte payload region from the remainder
+    // depth * MAX_DATA_SIZE byte payload region from the remainder. Every
+    // entry gets one, because a kind is fixed only by the first store, after
+    // this allocation; a value entry's region goes unused. The planned
+    // autocoder (SDD §7) fixes kinds in configuration, so that only data
+    // entries are given payload.
     for (FwSizeType i = 0; i < StateBufferStoreCfg::StateEntry::NUM_ENTRIES; i++) {
         Entry& block = this->m_entries[i];
         block.data = cursor;
@@ -377,7 +381,7 @@ void StateBufferStore::ValueSnapshot::copy(const Entry& block) {
 void StateBufferStore::DataSnapshot::copy(const Entry& block) {
     this->kind = StateBufferStore::checkedKind(block.kind.load(std::memory_order_relaxed));
     const FwSizeType slotIndex = block.latest;
-    // As in ValueSnapshot::copy, only corruption can put latest outside the ring
+    // Only corruption can put latest outside the ring
     FW_ASSERT(slotIndex < block.depth, static_cast<FwAssertArgType>(slotIndex),
               static_cast<FwAssertArgType>(block.depth));
     this->measurement = block.history[slotIndex];
@@ -394,10 +398,10 @@ void StateBufferStore::WatermarkSnapshot::copy(const Entry& block) {
     const bool pending = block.clearPending.load(std::memory_order_acquire);
     // Once a put has consumed this read's own clear, the watermarks the
     // clear ended are the ones that put retired
-    const bool retired = this->clear and not pending;
+    const bool retired = (this->role == ClearRole::OWNS) and not pending;
     this->min = retired ? block.retiredMin : block.min;
     this->max = retired ? block.retiredMax : block.max;
-    this->cleared = this->clear ? this->alreadyCleared : pending;
+    this->cleared = (this->role == ClearRole::NONE) ? pending : (this->role == ClearRole::REDUNDANT);
     this->stored = block.stored;
     this->kind = StateBufferStore::checkedKind(block.kind.load(std::memory_order_relaxed));
 }
@@ -671,7 +675,6 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
                                            StateBufferStore_ReadOperation operation,
                                            SbsMeasurement& min,
                                            SbsMeasurement& max) {
-    const bool clear = (operation == StateBufferStore_ReadOperation::CLEAR_AND_GET_MIN_MAX);
     // Decided before any clear is marked: an unwritten entry has no epoch to end
     const SbsStatus readable = StateBufferStore::readableKind(block, true);
     if (readable == SbsStatus::NOT_WRITTEN) {
@@ -681,19 +684,19 @@ SbsStatus StateBufferStore::readWatermarks(Entry& block,
     if (readable != SbsStatus::OK) {
         return readable;
     }
-    // A clear that finds one already pending ends an epoch with no puts in it
-    const bool alreadyCleared = clear and block.clearPending.exchange(true, std::memory_order_acq_rel);
-    WatermarkSnapshot snapshot(clear, alreadyCleared);
+    ClearRole role = ClearRole::NONE;
+    if (operation == StateBufferStore_ReadOperation::CLEAR_AND_GET_MIN_MAX) {
+        // A clear that finds one already pending ends an epoch with no puts in it
+        role = block.clearPending.exchange(true, std::memory_order_acq_rel) ? ClearRole::REDUNDANT : ClearRole::OWNS;
+    }
+    WatermarkSnapshot snapshot(role);
 
     if (not this->coherentRead(block, operation, snapshot)) {
-        if (clear and not snapshot.alreadyCleared) {
-            // Clearers are guarded, so only a put can have reset the flag since
-            // this read set it. If none has, withdraw the clear so the epoch it
-            // would have ended, never reported, is kept; if one has, that put
-            // already retired the epoch and the failed exchange changes nothing.
-            bool expected = true;
-            (void)block.clearPending.compare_exchange_strong(expected, false, std::memory_order_acq_rel,
-                                                             std::memory_order_acquire);
+        if (role == ClearRole::OWNS) {
+            // Withdraw this read's own clear so the epoch it would have ended,
+            // never reported, is kept. Clearers are guarded and puts only reset
+            // the flag, so this cannot cancel a clear made by anyone else.
+            block.clearPending.store(false, std::memory_order_release);
         }
         return SbsStatus::INCOHERENT;
     }

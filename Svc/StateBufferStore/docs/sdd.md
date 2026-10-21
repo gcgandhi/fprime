@@ -442,7 +442,8 @@ Memory used is
 `sum over entries of depth * (sizeof(Measurement) + MAX_DATA_SIZE)`. Because
 `MAX_DATA_SIZE` multiplies by depth for *every* entry, including entries that
 only ever hold primitives, projects storing few structures should keep
-`MAX_DATA_SIZE` tight.
+`MAX_DATA_SIZE` tight. The payload of value entries is unused; the autocoder
+of §7 is to remove it.
 
 Reads also use the caller's stack for their scratch copy: `getData` takes
 `MAX_DATA_SIZE` bytes, and `getHistory` and `getNHistory` take
@@ -582,7 +583,8 @@ unconnected stamps every measurement with zero time.
 - **Clears are serialized.** `clearMinMax`, `clearAndGetMinMax`, and
   `CLEAR_WATERMARKS` are guarded, so a clearer waits only for another clearer,
   never for a put or a read.
-- **Type changes do not re-seed watermarks** — see §3.3.
+- **Type changes do not re-seed watermarks** — see §3.3. `putValue` does not
+  enforce one type per entry; enforcing it is deferred to the autocoder (§7).
 - **`configure()` is a new lifecycle requirement** that the heritage library did
   not have, since it allocated statically. A component whose `configure()` was
   never called asserts on first use of a store, read, or telemetry port, or of
@@ -597,7 +599,14 @@ unconnected stamps every measurement with zero time.
   sources are the deployment's telemetry dictionary, for channel IDs and
   types, and a project entry list (for example XML or JSON) naming each entry,
   its depth, and any channel it stores. Both are written by hand for now, as
-  `Svc::PolyDb`'s configuration is.
+  `Svc::PolyDb`'s configuration is. The input file would also fix each entry's
+  kind, so that `configure()` allocates payload slots for data entries only.
+  Today a kind is fixed only by an entry's first store, after `configure()`
+  has allocated, so every entry gets `depth * MAX_DATA_SIZE` payload bytes
+  (§4), which value entries never use. For a value entry, the input file
+  would also fix its value type, so that `putValue` could refuse a value of
+  any other type. Today `putValue` stores a value of any type, and a type
+  change freezes the entry's watermarks without error (§3.3).
 - Faster telemetry lookup. `tlmIn` finds a channel's mapping by a linear scan
   of the table (§3.8), so each received channel costs time proportional to the
   number of mapped channels, and an unmapped channel costs a full scan. With
@@ -737,3 +746,5 @@ asserts inside `Fw` before the component sees the result.
 | 2026-10-17 | Lockless versus guarded trade-off on flight processors summarized |
 | 2026-10-19 | Reusable integration tests run against a local topology; Verification column and deferred-work item updated |
 | 2026-10-19 | Every read decides `WRONG_KIND` and, for an entry never stored to, `NOT_WRITTEN` from the entry kind before reading, so neither can be reported `INCOHERENT` by a read racing a writer; a snapshot of another kind asserts; coverage figures refreshed |
+| 2026-10-21 | Payload slots of value entries, allocated but unused, recorded as deferred to the autocoder |
+| 2026-10-21 | Per-entry value type enforcement on `putValue` recorded as deferred to the autocoder |
