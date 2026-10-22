@@ -180,6 +180,17 @@ void StateBufferStore::configure(FwEnumStoreType memId,
         }
     }
 
+    // Every depth is at most MAX_HISTORY_DEPTH (asserted below), so this bounds
+    // the sums: a wrapped size would allocate short and the carve-up would
+    // construct slots past its end. Written as divisions and a subtraction so
+    // that the check itself cannot wrap.
+    constexpr FwSizeType SLOT_BYTES_LIMIT = std::numeric_limits<FwSizeType>::max() /
+                                            static_cast<FwSizeType>(StateBufferStoreCfg::StateEntry::NUM_ENTRIES) /
+                                            static_cast<FwSizeType>(StateBufferStoreCfg::MAX_HISTORY_DEPTH);
+    static_assert((static_cast<FwSizeType>(sizeof(Measurement)) <= SLOT_BYTES_LIMIT) and
+                      (static_cast<FwSizeType>(StateBufferStoreCfg::MAX_DATA_SIZE) <=
+                       (SLOT_BYTES_LIMIT - static_cast<FwSizeType>(sizeof(Measurement)))),
+                  "History allocation size overflows FwSizeType");
     // Sum the per-entry regions first so the whole history is one allocation:
     // Fw::MemAllocator does not promise that an identifier may be reused
     // across calls, so a component gets one chance to allocate.

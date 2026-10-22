@@ -158,8 +158,6 @@ Estimates scaled from a desktop benchmark, not measured on flight hardware:
   attempt (§6), where a guarded read would block until the write finishes, with
   priority inheritance, and then succeed. A writer that preempts its reader
   costs the reader only one retry.
-- **Multicore.** Readers never block and never contend with one another,
-  whereas guarded readers would serialize.
 
 ### 3.3 Watermarks and `Fw::PolyType` comparison
 
@@ -231,13 +229,6 @@ controlled by topology wiring**: connect them only to the component responsible
 for reporting and resetting watermarks. The `CLEAR_WATERMARKS` command provides
 the same capability to ground.
 
-`REPORT_WATERMARKS` and `CLEAR_WATERMARKS` reject an entry argument naming the
-`NUM_ENTRIES` sizing counter (`VALIDATION_ERROR`) or a data entry
-(`EXECUTION_ERROR`), emitting the warning-low `ReportWatermarksRejected` or
-`ClearWatermarksRejected` event with the reason. A `REPORT_WATERMARKS` whose
-read stays torn fails with `EXECUTION_ERROR`; the `FailedReadCoherentData`
-event it emits names the command.
-
 ### 3.6 Status reporting
 
 `SbsStatus` preserves the heritage status enumeration's values 0-5 so that ported
@@ -248,11 +239,9 @@ Three heritage behaviors were deliberately changed:
 
 - **`INCOHERENT` is new, and the event is a warning.** The heritage `get`
   emitted a FATAL event on retry exhaustion and then returned the possibly-torn
-  data with its stored validity, so a caller that ignored events could consume
-  bad data silently. This component reports `INCOHERENT` and copies nothing out,
-  so the caller can act on it. The event is warning high rather than FATAL: a
-  deployment whose event manager forwards FATAL events to `Svc::FatalHandler`
-  would end the software on the event, leaving `INCOHERENT` unreachable.
+  data with its stored validity. This component reports `INCOHERENT` and copies nothing out,
+  so the caller can act on it. The event is warning high rather than FATAL, a
+  choice made to accommodate a wider variety of FSW architectures.
 - **Entry kinds are refused, not asserted.** The heritage `put` asserted that a
   value matched its entry's configured type. Here an entry is fixed as a value
   or data entry by its first store, or by `configure()` when a telemetry
@@ -271,6 +260,8 @@ Three heritage behaviors were deliberately changed:
   entry's history is kept for coherency but is not readable. A
   telemetry-mapped entry also refuses `putValue`, keeping `tlmIn` its only
   writer.
+  This should be re-evaluated if the configuration autocoder (§7) is
+  implemented, since it would fix each entry's kind in configuration.
 - **`UNINITIALIZED` is unreachable.** The heritage module checked a global
   initialization flag on every call. Here, calling any store, read, or
   telemetry port, or a watermark command naming an entry, before
@@ -322,11 +313,7 @@ A channel mapped as `TYPE_DATA` — a struct, string, or array channel — is no
 decoded: its serialized bytes are stored as `putData` stores data, in an entry
 `configure()` fixes as a data entry, and are read back with `getData`. They are
 the channel's FPP serialization, so a consumer decodes them with the channel
-type's own `deserializeFrom` (§5). A `TYPE_DATA` value larger than
-`MAX_DATA_SIZE` is not stored and is reported by the throttled `TlmDataTooLarge`
-warning, which `RESET_THROTTLES` re-enables; since a
-telemetry buffer may hold up to `FW_TLM_BUFFER_MAX_SIZE` bytes, size
-`MAX_DATA_SIZE` for the largest such channel.
+type's own `deserializeFrom` (§5). 
 
 Either way, two things differ from a put:
 
@@ -340,13 +327,7 @@ Either way, two things differ from a put:
   `setTlmValidity(entry, INVALID)` when its source goes bad and `OK` when it
   recovers, not before every sample. Called from the producer's own thread,
   it takes effect for the very next sample; a sample already stored keeps the
-  validity it was recorded with. A one-shot flag, consumed by the next sample,
-  was rejected for two reasons. A send-on-change channel may never send the
-  sample it was meant for, so the mark would land on a later, possibly good
-  one. And a forgotten mark would record bad data as `OK`, whereas a forgotten
-  reset records good data as `INVALID`, the conservative failure.
-  `REPORT_WATERMARKS` reports the validity in force, so one left `INVALID` is
-  visible from the ground. The port writes only that per-entry
+  validity it was recorded with. The port writes only that per-entry
   atomic, never the counter-protected fields, so `tlmIn` remains the entry's
   one writer. It reports `WRONG_KIND` for an entry not mapped to telemetry,
   which carries validity with each put instead.
@@ -426,7 +407,7 @@ throttle and hide `INCOHERENT` reads of every other entry, so send
 | Name | Meaning |
 |---|---|
 | `StateEntry` | The set of stored entries. `NUM_ENTRIES` is a required last member used to size the entry tables; it is not an addressable entry, and commands naming it are rejected. |
-| `HistoryDepths` | Per-entry history depth, one element per entry. Each must be in `[MIN_HISTORY_DEPTH, MAX_HISTORY_DEPTH]`, asserted by `configure()`. The sample sets its last two entries to the two bounds. |
+| `HistoryDepths` | Per-entry history depth, one element per entry. Each must be in `[MIN_HISTORY_DEPTH, MAX_HISTORY_DEPTH]`, asserted by `configure()`. |
 | `MIN_HISTORY_DEPTH` | Lower bound on any entry's depth: 2, per REQ-STATEBUFFERSTORE-010. |
 | `MAX_HISTORY_DEPTH` | Upper bound on any entry's depth. |
 | `DEFAULT_HISTORY_DEPTH` | Typical depth, used by the sample for most entries. |
@@ -513,6 +494,7 @@ output port loadValue: Svc.SbsGet
 Fw::PolyType value(static_cast<U32>(42));
 const Svc::SbsStatus stored =
     this->storeValue_out(0, Svc::StateBufferStoreCfg::StateEntry::SBS_ENTRY_00, value, Svc::SbsStatus::OK);
+```
 
 A consumer that tracks freshness keeps the time of the last measurement it
 processed, starting from `Fw::ZERO_TIME` (no previous read):
@@ -585,11 +567,9 @@ unconnected stamps every measurement with zero time.
   never for a put or a read.
 - **Type changes do not re-seed watermarks** — see §3.3. `putValue` does not
   enforce one type per entry; enforcing it is deferred to the autocoder (§7).
-- **`configure()` is a new lifecycle requirement** that the heritage library did
-  not have, since it allocated statically. A component whose `configure()` was
-  never called asserts on first use of a store, read, or telemetry port, or of
+- **`configure()` is required before use.** A component whose `configure()`
+  was never called asserts on first use of a store, read, or telemetry port, or of
   a watermark command naming an entry, rather than reading null pointers.
-  `RESET_THROTTLES` touches no entry and works either way.
 
 ## 7. Deferred work
 
@@ -598,7 +578,8 @@ unconnected stamps every measurement with zero time.
   table of §3.8 from a deployment input file, as proposed in #5067. Likely
   sources are the deployment's telemetry dictionary, for channel IDs and
   types, and a project entry list (for example XML or JSON) naming each entry,
-  its depth, and any channel it stores. Both are written by hand for now, as
+  its depth, and any channel it stores; alternatively, the FPP language
+  itself could express them. Both are written by hand for now, as
   `Svc::PolyDb`'s configuration is. The input file would also fix each entry's
   kind, so that `configure()` allocates payload slots for data entries only.
   Today a kind is fixed only by an entry's first store, after `configure()`
@@ -634,7 +615,7 @@ unconnected stamps every measurement with zero time.
 - Topology integration. No deployment in this repository instantiates this
   component (nor `Svc::PolyDb`), so the reusable integration tests in
   `test/int/test_StateBufferStore.py` are not run by CI. They have been run, and
-  all passed, against a local, uncommitted topology outside this repository:
+  all passed, against a topology outside this repository:
   the component with a producer and a consumer on separate rate-group threads,
   one telemetry-mapped value entry, and one telemetry-mapped `TYPE_DATA`
   entry. To run them against a deployment, map the component in that
@@ -670,9 +651,9 @@ unconnected stamps every measurement with zero time.
 
 ## 8. Unit test coverage
 
-The unit tests cover 98% of the lines of `StateBufferStore.cpp` (599 of 609)
-and every function in it. gcovr counts 56.0% of branches across the component's
-source and header (1111 of 1984); most of the remainder are the failure branches
+The unit tests cover 98% of the lines of `StateBufferStore.cpp` (600 of 610)
+and every function in it. gcovr counts 56.4% of branches across the component's
+source and header (1099 of 1950); most of the remainder are the failure branches
 of `FW_ASSERT`s and of code generated by the compiler, in line with comparable
 components such as `Svc::TimeConverter`.
 
@@ -690,28 +671,47 @@ The uncovered lines are:
 - The closing lines of `getMinMax_handler` and `clearAndGetMinMax_handler`,
   which gcov reports as unexecuted although both handlers are exercised.
 - A history snapshot's guard against copying from a non-value entry, which
-  only a corrupted kind reaches; the death test that reaches it runs in a
-  child process, which the figures do not count.
+  only a corrupted kind reaches, in a death test.
 
 The assertion paths — use before `configure()`, configuring twice, an untyped
-value, a malformed telemetry table, and an entry control block corrupted after
-`configure()` (depth, index, ring and payload pointers, latest slot, stored
-count, kind, telemetry validity), including a kind flipped mid-read to the
-other valid kind for each read — are verified by death tests. The corruption checks guard against
-memory upsets such as radiation-induced bit flips. Some cannot be reached once
-the others hold, so they are not tested: the slot indices computed by
-`Fw::CircularIndex`, which reduces them modulo the depth (the writer's new slot
-and each history record's slot), the bound on a history snapshot's record
-count, the size checks on the history copy out, and the null check on a data
-store's source, which `putData` refuses first and `Fw::TlmBuffer` never
-supplies. The stores' precondition that a validity is `OK` or `INVALID` is
-likewise untested: `putValue`, `putData`, and `setTlmValidity` refuse any other
-validity first, and `tlmIn` checks the telemetry validity itself, an assertion
-covered by the corrupted-entry death test. Death tests run in a
-child process that exits through the assertion, so they do not contribute to
-the coverage figures. A short allocation is not tested: the
-component requests memory with `Fw::MemAllocator::checkedAllocate`, which
-asserts inside `Fw` before the component sees the result.
+value, a malformed telemetry mapping table, and an entry control block
+corrupted after `configure()` (depth, index, ring and payload pointers, latest
+slot, stored count, kind, telemetry validity), including a kind flipped
+mid-read to the other valid kind for each read — are verified by death tests.
+Death tests run in a child process that exits through the assertion, so they
+do not contribute to the coverage figures. The corruption checks guard against
+memory upsets such as radiation-induced bit flips.
+
+The remaining assertions are not tested:
+
+- **Unreachable once the others hold.** The slot indices computed by
+  `Fw::CircularIndex`, which reduces them modulo the depth (the writer's new
+  slot and each history record's slot); the bound on a history snapshot's
+  copied record count; `readHistory`'s bound on the requested count, which
+  both history handlers clamp to the depth; the size checks on the history copy
+  out; and the end of `configure()`'s carve-up, which sums the same depths the
+  sizing loop does.
+- **Refused before the store.** A data store's size bound and null-source
+  check, which `putData` and `tlmIn` check first (`Fw::TlmBuffer` never
+  supplies a null source); the stores' precondition that a validity is `OK` or
+  `INVALID`, which `putValue`, `putData`, and `setTlmValidity` refuse first,
+  while `tlmIn` checks the telemetry validity itself, an assertion covered by
+  the corrupted-entry death test.
+- **Fixed by configuration or platform.** The bounds `configure()` checks on
+  each `HistoryDepths` element, which a test cannot vary without its own
+  configuration; and the lock-free checks on the entry atomics, which hold on
+  every platform the tests run on.
+- **Reachable but not yet exercised.** The bound on an entry argument, which a
+  port caller naming the `NUM_ENTRIES` sizing counter trips (the watermark
+  commands reject it first); `readHistory`'s check that a coherent history
+  snapshot serialized, which only corruption fails; and `tlmIn`'s check that a
+  mapped value entry still holds the telemetry kind, which only a corruption to
+  another valid kind reaches, since `checkedEntry` asserts on an undefined one
+  first.
+
+A short allocation is not tested: the component requests memory with
+`Fw::MemAllocator::checkedAllocate`, which asserts inside `Fw` before the
+component sees the result.
 
 ## 9. Change log
 

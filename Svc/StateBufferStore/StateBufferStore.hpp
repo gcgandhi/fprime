@@ -33,6 +33,9 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Destroy StateBufferStore object, releasing the measurement history
     ~StateBufferStore();
 
+    StateBufferStore(const StateBufferStore&) = delete;
+    StateBufferStore& operator=(const StateBufferStore&) = delete;
+
     //! Allocate the measurement history, storing no telemetry
     //!
     //! Must be called once, after construction and before any port is invoked.
@@ -43,7 +46,8 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! Allocate the measurement history and set the telemetry channels to store
     //!
     //! Must be called once, after construction and before any port is invoked.
-    //! Each mapped entry becomes a value entry. Channel IDs and entries must
+    //! Each mapped entry becomes a value entry, or a data entry for a TYPE_DATA
+    //! mapping, written only by tlmIn. Channel IDs and entries must
     //! each appear at most once in tlmMappings.
     void configure(
         FwEnumStoreType memId,                               //!< Identifier used when dealing with the Fw::MemAllocator
@@ -70,12 +74,14 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! A stored measurement, as held internally
     struct Measurement {
         Fw::Time time;                                //!< when the value was written
-        Fw::PolyType value;                           //!< the primitive value, set by putValue (KIND_VALUE/KIND_TLM);
+        Fw::PolyType value;                           //!< the primitive value, set by storeValue (putValue for
+                                                      //!< KIND_VALUE, tlmIn for KIND_TLM);
                                                       //!< left default (TYPE_NOTYPE) for data entries, whose payload
                                                       //!< lives in the paired Entry::data slot instead
         SbsStatus validity = SbsStatus::NOT_WRITTEN;  //!< validity recorded by the writer
-        FwSizeType dataSize = 0;                      //!< bytes used in the paired Entry::data slot, set by putData
-                                                      //!< (KIND_DATA/KIND_TLM_DATA); 0 for value entries
+        FwSizeType dataSize = 0;                      //!< bytes used in the paired Entry::data slot, set by storeData
+                                                      //!< (putData for KIND_DATA, tlmIn for KIND_TLM_DATA); 0 for
+                                                      //!< value entries
     };
 
     //! Per-entry control block
@@ -86,17 +92,18 @@ class StateBufferStore final : public StateBufferStoreComponentBase {
     //! coherency counter was even and unchanged across its copy.
     struct Entry {
         Measurement* history;               //!< ring of depth measurements; history[slotIndex] is that slot's
-                                            //!< time/value/validity/dataSize, set by putValue/putData
+                                            //!< time/value/validity/dataSize, set by storeValue/storeData
         U8* data;                           //!< depth payload slots of MAX_DATA_SIZE bytes; data[slotIndex] is the
-                                            //!< payload backing history[slotIndex], written/read by putData/getData
+                                            //!< payload backing history[slotIndex], written by storeData and
+                                            //!< read by getData
         std::atomic<U32> coherencyCounter;  //!< odd while a write is in progress
         std::atomic<U8> kind;               //!< EntryKind, claimed by the first store or by configure()
         std::atomic<bool> clearPending;     //!< when set, the next put starts new watermarks
         std::atomic<U8> tlmValidity;        //!< SbsStatus (OK or INVALID) tlmIn records, set by setTlmValidity
         FwSizeType depth;                   //!< configured history depth
         FwSizeType latest;                  //!< index of the most recent measurement
-        FwSizeType stored;                  //!< count of slots actually written since the last clear, saturating
-                                            //!< at depth once the ring has wrapped; distinguishes an unfilled
+        FwSizeType stored;                  //!< count of slots actually written, saturating at depth once the
+                                            //!< ring has wrapped, and never reset by a watermark clear; distinguishes an unfilled
                                             //!< ring (stale/default slots beyond stored) from a full one, and
                                             //!< bounds how far history reads may walk back from latest
         Measurement min;                    //!< minimum value recorded
